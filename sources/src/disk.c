@@ -6467,3 +6467,29 @@ void disk_reserved_reset_disk_change(int num)
 		drv->dskchange = false;
 	}
 }
+
+/* uprough-debug: disk DMA snapshot. Returns 8 u32:
+ *   [0] dskpt (current DMA pointer)
+ *   [1] dsklen (raw DSKLEN value with enable bit)
+ *   [2] dsklength (decoded word count)
+ *   [3] dskdmaen (DMA mode: 0=off, 1=read, 2=write)
+ *   [4] dskbytr_val (latest read byte)
+ *   [5] dsksync (last DSKSYNC programmed)
+ *   [6] adkcon (relevant disk bits in ADKCON)
+ *   [7] floppy 0 motor state (1=on, 0=off)
+ */
+extern uae_u16 dsksync;
+extern uae_u16 adkcon;
+struct floppy_state_dummy { int motoroff; };
+void uprough_disk_get_state(uae_u32 *out)
+{
+   if (!out) return;
+   out[0] = dskpt;
+   out[1] = (uae_u32)dsklen;
+   out[2] = (uae_u32)dsklength;
+   out[3] = (uae_u32)dskdmaen;
+   out[4] = (uae_u32)dskbytr_val;
+   out[5] = (uae_u32)dsksync;
+   out[6] = (uae_u32)adkcon;
+   out[7] = 0;  /* motor state requires reaching `floppy` array; defer */
+}

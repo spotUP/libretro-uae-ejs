@@ -715,10 +715,41 @@ void REGPARAM2 chipmem_bput_limit(uaecptr addr, uae_u32 b)
 }
 
 
+/* uprough-debug read watchpoint state — set via _uprough_set_read_watch.
+ * Checked in the chipmem read accessors below. Fast-path: one volatile
+ * load + branch when len==0 (common case). */
+volatile uae_u32 g_uprough_read_watch_addr = 0;
+volatile uae_u32 g_uprough_read_watch_len  = 0;
+extern volatile uae_u32 g_uprough_halt_req;
+
+static inline void uprough_read_watch_check(uaecptr addr)
+{
+   uae_u32 len = g_uprough_read_watch_len;
+   if (len == 0) return;
+   uae_u32 base = g_uprough_read_watch_addr;
+   uae_u32 a = (uae_u32)addr;
+   if (a >= base && a < base + len) {
+      g_uprough_halt_req = 1;
+   }
+}
+
+void uprough_set_read_watch(uae_u32 addr, uae_u32 len)
+{
+   g_uprough_read_watch_addr = addr;
+   g_uprough_read_watch_len  = len;
+}
+
+void uprough_clear_read_watch(void)
+{
+   g_uprough_read_watch_addr = 0;
+   g_uprough_read_watch_len  = 0;
+}
+
 static uae_u32 REGPARAM2 chipmem_lget (uaecptr addr)
 {
 	uae_u32 *m;
 
+	uprough_read_watch_check(addr);
 	addr &= chipmem_bank.mask;
 	m = (uae_u32 *)(chipmem_bank.baseaddr + addr);
 	return do_get_mem_long (m);
@@ -728,6 +759,7 @@ static uae_u32 REGPARAM2 chipmem_wget (uaecptr addr)
 {
 	uae_u16 *m, v;
 
+	uprough_read_watch_check(addr);
 	addr &= chipmem_bank.mask;
 	m = (uae_u16 *)(chipmem_bank.baseaddr + addr);
 	v = do_get_mem_word (m);
@@ -737,6 +769,7 @@ static uae_u32 REGPARAM2 chipmem_wget (uaecptr addr)
 static uae_u32 REGPARAM2 chipmem_bget (uaecptr addr)
 {
 	uae_u8 v;
+	uprough_read_watch_check(addr);
 	addr &= chipmem_bank.mask;
 	v = chipmem_bank.baseaddr[addr];
 	return v;

@@ -9038,7 +9038,9 @@ uae_u32 uprough_get_exception_catch_mask(void)      { return g_uprough_excmask; 
 
 #define UPROUGH_MAX_BP 64
 
-static volatile uae_u32 g_uprough_halt_req = 0;
+/* halt_req is referenced from memory.c (read watchpoints) and from
+ * the poll hook here — must be linkable across translation units. */
+volatile uae_u32 g_uprough_halt_req = 0;
 static volatile uae_u32 g_uprough_halted   = 0;
 static volatile uae_u32 g_uprough_step_req = 0;
 static volatile uae_u32 g_uprough_bp_pcs[UPROUGH_MAX_BP];
@@ -9407,6 +9409,31 @@ extern uae_s32 uprough_chip_get_copper_hcmp(void);
 
 /* CIA snapshot. Reads 16 u32 from CIAA (num=0) or CIAB (num=1). */
 extern void uprough_cia_get_state(int num, uae_u32 *out);
+
+/* Read watchpoints — instrumented in memory.c's chipmem accessors.
+ * Halt fires the FIRST cycle a CPU read touches [addr, addr+len).
+ * Note: this only catches chipmem reads. Fast-RAM and chipset
+ * register reads bypass these accessors. */
+extern void uprough_set_read_watch(uae_u32 addr, uae_u32 len);
+extern void uprough_clear_read_watch(void);
+
+void uprough_set_read_watch_exported(uae_u32 addr, uae_u32 len)
+{
+   uprough_set_read_watch(addr, len);
+}
+
+void uprough_clear_read_watch_exported(void)
+{
+   uprough_clear_read_watch();
+}
+
+/* Disk DMA snapshot. 8 u32 — see uprough_disk_get_state in disk.c. */
+extern void uprough_disk_get_state(uae_u32 *out);
+
+void uprough_get_disk(uae_u32 *out)
+{
+   uprough_disk_get_state(out);
+}
 
 void uprough_get_cia(int num, uae_u32 *out)
 {
