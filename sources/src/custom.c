@@ -17209,6 +17209,15 @@ uae_u32 uprough_chip_get_sprpt(int i)
    return (i >= 0 && i < MAX_SPRITES) ? (uae_u32)spr[i].pt : 0;
 }
 
+/* Copper live state. cop_state.ip is the current copper PC; ir[0/1]
+ * are the two words of the current instruction. */
+uae_u32 uprough_chip_get_copper_ip(void)    { return (uae_u32)cop_state.ip; }
+uae_u16 uprough_chip_get_copper_ir0(void)   { return cop_state.ir[0]; }
+uae_u16 uprough_chip_get_copper_ir1(void)   { return cop_state.ir[1]; }
+uae_u32 uprough_chip_get_copper_state(void) { return (uae_u32)cop_state.state; }
+uae_s32 uprough_chip_get_copper_vcmp(void)  { return cop_state.vcmp; }
+uae_s32 uprough_chip_get_copper_hcmp(void)  { return cop_state.hcmp; }
+
 /* Sprite vstart/vstop/xpos — useful to confirm sprite Y-positioning. */
 uae_s32 uprough_chip_get_sprpos(int i)
 {

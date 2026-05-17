@@ -3048,3 +3048,23 @@ void audio_cda_new_buffer(struct cd_audio_state *cas, uae_s16 *buffer, int lengt
 	if (cas->cda_streamid > 0)
 		audio_activate();
 }
+
+/* uprough-debug accessors: per-channel audio state. ch: 0..3 (Paula).
+ * Layout matches struct uprough_audio_chan in libretro-core.c. */
+void uprough_audio_get_channel(int ch, uae_u32 *out)
+{
+   if (ch < 0 || ch >= AUDIO_CHANNELS_PAULA || !out) {
+      for (int i = 0; i < 8; i++) out[i] = 0;
+      return;
+   }
+   struct audio_channel_data *c = &audio_channel[ch];
+   out[0] = (uae_u32)c->lc;
+   out[1] = (uae_u32)c->pt;
+   out[2] = (uae_u32)c->len;
+   out[3] = (uae_u32)c->wlen;
+   out[4] = (uae_u32)c->per;
+   out[5] = (uae_u32)c->state;
+   out[6] = (uae_u32)c->dat;
+   out[7] = c->dmaenstore ? 1u : 0u;
+}
+

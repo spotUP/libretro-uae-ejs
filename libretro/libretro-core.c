@@ -9049,6 +9049,7 @@ static volatile uae_u32 g_uprough_bp_count = 0;
  * load + a likely-zero branch for the common (no breakpoints, not
  * halted) case. Only hits the spin path when actually halted. */
 static inline int uprough_watch_check(void);   /* fwd decl, defined below */
+extern volatile uae_u32 g_uprough_step_n_remaining;  /* fwd, defined below */
 
 void uprough_cpu_poll_hook(void)
 {
@@ -9098,9 +9099,16 @@ void uprough_cpu_poll_hook(void)
 
    /* Step request: consume one and allow this instruction to execute.
     * The next call back into the hook will re-halt because halt_req
-    * is still 1. */
+    * is still 1. If step_n_remaining > 1 we additionally arm
+    * step_req again so the next instruction also passes through. */
    if (g_uprough_step_req) {
       g_uprough_step_req = 0;
+      if (g_uprough_step_n_remaining > 0) {
+         g_uprough_step_n_remaining--;
+         if (g_uprough_step_n_remaining > 0) {
+            g_uprough_step_req = 1;  /* arm next */
+         }
+      }
       return;
    }
 
@@ -9140,6 +9148,24 @@ void uprough_step(int n)
    g_uprough_halt_req = 1;
    g_uprough_step_req = 1;
 }
+
+/* Step N instructions then re-halt. Implemented as a counter: the
+ * poll hook decrements per instruction and engages the halt spin
+ * when it reaches 0. Caller must halt the CPU before calling
+ * step_n. n is clamped to [1, 65535]. */
+volatile uae_u32 g_uprough_step_n_remaining = 0;
+void uprough_step_n(uae_u32 n)
+{
+   if (n < 1) n = 1;
+   if (n > 65535) n = 65535;
+   g_uprough_step_n_remaining = n;
+   g_uprough_halt_req = 1;
+   /* Burn one step_req so the poll hook releases this instruction
+    * without re-halting; subsequent ticks check the remaining
+    * counter (in the hook itself — see below). */
+   g_uprough_step_req = 1;
+}
+uae_u32 uprough_step_n_remaining(void) { return g_uprough_step_n_remaining; }
 
 int uprough_set_breakpoint(uae_u32 pc)
 {
@@ -9354,6 +9380,40 @@ void *uprough_get_chipset_regs(void)
       g_uprough_chipset_snapshot.sprvstop[i] = uprough_chip_get_sprvstop(i);
    }
    return &g_uprough_chipset_snapshot;
+}
+
+/* Audio channel snapshot. Reads 4 Paula channels × 8 u32 fields each:
+ *   [0] lc (location), [1] pt (current ptr), [2] len, [3] wlen,
+ *   [4] per (period), [5] state, [6] dat (last sample word), [7] dmaen
+ * out must have 32 u32 slots. */
+extern void uprough_audio_get_channel(int ch, uae_u32 *out);
+
+void uprough_audio_get_all(uae_u32 *out)
+{
+   if (!out) return;
+   for (int ch = 0; ch < 4; ch++) {
+      uprough_audio_get_channel(ch, out + ch * 8);
+   }
+}
+
+/* Copper live state. Returns 6 u32: ip, ir0 (zero-extended u16),
+ * ir1, state, vcmp, hcmp. */
+extern uae_u32 uprough_chip_get_copper_ip(void);
+extern uae_u16 uprough_chip_get_copper_ir0(void);
+extern uae_u16 uprough_chip_get_copper_ir1(void);
+extern uae_u32 uprough_chip_get_copper_state(void);
+extern uae_s32 uprough_chip_get_copper_vcmp(void);
+extern uae_s32 uprough_chip_get_copper_hcmp(void);
+
+void uprough_copper_get_state(uae_u32 *out)
+{
+   if (!out) return;
+   out[0] = uprough_chip_get_copper_ip();
+   out[1] = (uae_u32)uprough_chip_get_copper_ir0();
+   out[2] = (uae_u32)uprough_chip_get_copper_ir1();
+   out[3] = uprough_chip_get_copper_state();
+   out[4] = (uae_u32)uprough_chip_get_copper_vcmp();
+   out[5] = (uae_u32)uprough_chip_get_copper_hcmp();
 }
 
 /* Palette read: fills a caller-provided buffer with up to 256 colors,
