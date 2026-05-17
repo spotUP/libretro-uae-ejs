@@ -17193,3 +17193,42 @@ uae_u16 uprough_chip_get_bplcon1(void) { return bplcon1; }
 uae_u16 uprough_chip_get_bplcon2(void) { return bplcon2; }
 uae_u16 uprough_chip_get_bplcon3(void) { return bplcon3; }
 uae_u32 uprough_chip_get_bplpt(int i)  { return (i >= 0 && i < MAX_PLANES) ? bplpt[i] : 0; }
+
+/* BPLnMOD: per-bitplane modulo registers (read between rasterlines
+ * to advance the bplpt pointers by BPL?MOD bytes). */
+uae_s16 uprough_chip_get_bpl1mod(void) { return bpl1mod; }
+uae_s16 uprough_chip_get_bpl2mod(void) { return bpl2mod; }
+
+/* FMODE: AGA fetch-mode register ($DFF1FC). 0=OCS, 1=2x, 2=2x, 3=4x.
+ * Drives DDFSTRT/STOP granularity + sprite width. */
+uae_u16 uprough_chip_get_fmode(void)   { return (uae_u16)fmode; }
+
+/* Sprite pointer (SPRnPTH/L). MAX_SPRITES = 8 on AGA. */
+uae_u32 uprough_chip_get_sprpt(int i)
+{
+   return (i >= 0 && i < MAX_SPRITES) ? (uae_u32)spr[i].pt : 0;
+}
+
+/* Sprite vstart/vstop/xpos — useful to confirm sprite Y-positioning. */
+uae_s32 uprough_chip_get_sprpos(int i)
+{
+   if (i < 0 || i >= MAX_SPRITES) return 0;
+   /* Pack vstart(top16) | xpos(bottom16). vstop fetched separately. */
+   return ((uae_s32)spr[i].vstart << 16) | ((uae_s32)spr[i].xpos & 0xffff);
+}
+
+uae_s16 uprough_chip_get_sprvstop(int i)
+{
+   return (i >= 0 && i < MAX_SPRITES) ? (uae_s16)spr[i].vstop : 0;
+}
+
+/* Palette read. Returns AGA-style 24-bit RGB regardless of mode
+ * (ECS colors are 12-bit but UAE's color_reg_get does the conversion).
+ * idx: 0..31 ECS / 0..255 AGA. Caller bounds-checks via FMODE. */
+uae_u32 uprough_chip_get_color(int idx)
+{
+   if (idx < 0 || idx >= 256) return 0;
+   /* color_reg_get is a STATIC_INLINE that picks ECS vs AGA based on
+    * the entry — safe to call here. */
+   return (uae_u32)color_reg_get(&current_colors, idx);
+}

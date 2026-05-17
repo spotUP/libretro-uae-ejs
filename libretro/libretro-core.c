@@ -8918,6 +8918,10 @@ struct uprough_cpu_snapshot {
    uae_u32 intmask;         /* offset 92  */
    uae_u32 exception;       /* offset 96  */
    uae_u32 opcode;          /* offset 100 (last fetched opcode word, zero-extended) */
+   uae_u32 vbr;             /* offset 104 — Vector Base Register (020+) */
+   uae_u32 fpcr;            /* offset 108 — FPU control */
+   uae_u32 fpsr;            /* offset 112 — FPU status */
+   uae_u32 fpiar;           /* offset 116 — FPU instruction addr */
 };
 
 static struct uprough_cpu_snapshot g_uprough_cpu_snapshot;
@@ -8950,6 +8954,16 @@ void *uprough_get_cpu_regs(void)
    g_uprough_cpu_snapshot.intmask        = (uae_u32)regs.intmask;
    g_uprough_cpu_snapshot.exception      = (uae_u32)regs.exception;
    g_uprough_cpu_snapshot.opcode         = (uae_u32)regs.opcode;
+   g_uprough_cpu_snapshot.vbr            = regs.vbr;
+#ifdef FPUEMU
+   g_uprough_cpu_snapshot.fpcr           = regs.fpcr;
+   g_uprough_cpu_snapshot.fpsr           = regs.fpsr;
+   g_uprough_cpu_snapshot.fpiar          = regs.fpiar;
+#else
+   g_uprough_cpu_snapshot.fpcr           = 0;
+   g_uprough_cpu_snapshot.fpsr           = 0;
+   g_uprough_cpu_snapshot.fpiar          = 0;
+#endif
 
    return &g_uprough_cpu_snapshot;
 }
@@ -8958,6 +8972,54 @@ size_t uprough_cpu_snapshot_size(void)
 {
    return sizeof(g_uprough_cpu_snapshot);
 }
+
+/* ------------------------------------------------------------------
+ * PC ring buffer — last UPROUGH_TRACE_LEN program counters in
+ * fetch order. Mostly free in the no-halt fast path (one write +
+ * one mask) and pays off enormously when the CPU has wedged at
+ * PC=0xDEADBEEF — the JS bridge can read the trace and tell you
+ * EXACTLY what was running before the crash.
+ *
+ * Power-of-two so the index wrap is a single AND. 256 slots ≈ 1 KB.
+ * ------------------------------------------------------------------ */
+#define UPROUGH_TRACE_LEN 256
+#define UPROUGH_TRACE_MASK (UPROUGH_TRACE_LEN - 1)
+static volatile uae_u32 g_uprough_trace_pcs[UPROUGH_TRACE_LEN];
+static volatile uae_u32 g_uprough_trace_head = 0;   /* next slot to write */
+static volatile uae_u32 g_uprough_trace_enabled = 0;
+
+void uprough_trace_set_enabled(int v) { g_uprough_trace_enabled = v ? 1u : 0u; }
+int  uprough_trace_get_enabled(void)  { return (int)g_uprough_trace_enabled; }
+
+void uprough_trace_clear(void)
+{
+   for (uae_u32 i = 0; i < UPROUGH_TRACE_LEN; i++) g_uprough_trace_pcs[i] = 0;
+   g_uprough_trace_head = 0;
+}
+
+void *uprough_trace_get_ptr(void)         { return (void *)g_uprough_trace_pcs; }
+uae_u32 uprough_trace_get_head(void)      { return g_uprough_trace_head; }
+uae_u32 uprough_trace_get_capacity(void)  { return UPROUGH_TRACE_LEN; }
+
+/* ------------------------------------------------------------------
+ * Exception catchpoints. Bitmask of 68k exception vectors that
+ * should auto-halt when taken. Checked in uprough_cpu_poll_hook
+ * each instruction — when regs.exception != 0 AND the corresponding
+ * bit is set, halt_req is raised.
+ *
+ * Common bits a demo dev wants to catch:
+ *   2 = Bus error
+ *   3 = Address error
+ *   4 = Illegal instruction
+ *   5 = Divide by zero
+ *   8 = Privilege violation
+ *  10 = Line A emulator (often hit on bad opcode)
+ *  11 = Line F emulator (FPU not present)
+ * ------------------------------------------------------------------ */
+static volatile uae_u32 g_uprough_excmask = 0;
+
+void uprough_set_exception_catch_mask(uae_u32 mask) { g_uprough_excmask = mask; }
+uae_u32 uprough_get_exception_catch_mask(void)      { return g_uprough_excmask; }
 
 /* ------------------------------------------------------------------
  * Halt / step / breakpoint state.
@@ -8990,9 +9052,30 @@ static inline int uprough_watch_check(void);   /* fwd decl, defined below */
 
 void uprough_cpu_poll_hook(void)
 {
+   /* Common-path optimisation: PC fetched once and reused for trace +
+    * breakpoint check. Hot path is one m68k_getpc() + ring write +
+    * branch checks. */
+   uae_u32 pc = m68k_getpc();
+
+   /* PC trace ring (cheap when enabled, no-op when disabled). */
+   if (g_uprough_trace_enabled) {
+      uae_u32 h = g_uprough_trace_head;
+      g_uprough_trace_pcs[h & UPROUGH_TRACE_MASK] = pc;
+      g_uprough_trace_head = h + 1;
+   }
+
+   /* Exception catchpoint: regs.exception is non-zero during the
+    * cycle the CPU is taking an exception. The 68k vector number is
+    * encoded as exception index; we use it as a bit in the mask
+    * (bit N = vector N). Mask = 0 means no catchpoints, common path. */
+   if (g_uprough_excmask != 0 && regs.exception != 0) {
+      if (regs.exception < 32 && (g_uprough_excmask & (1u << regs.exception))) {
+         g_uprough_halt_req = 1;
+      }
+   }
+
    /* Breakpoint check (skipped when list is empty — the common path). */
    if (g_uprough_bp_count != 0) {
-      uae_u32 pc = m68k_getpc();
       for (uae_u32 i = 0; i < g_uprough_bp_count; i++) {
          if (g_uprough_bp_pcs[i] == pc) {
             g_uprough_halt_req = 1;
@@ -9205,6 +9288,14 @@ struct uprough_chipset_snapshot {
    uae_u16 bplcon2;
    uae_u16 bplcon3;
    uae_u32 bplpt[8];    /* BPL1PT..BPL8PT */
+   /* AGA additions: BPL modulos, AGA fetch mode, sprite ptrs. */
+   uae_s16 bpl1mod;
+   uae_s16 bpl2mod;
+   uae_u16 fmode;
+   uae_u16 pad0;
+   uae_u32 sprpt[8];    /* SPRn pointers */
+   uae_s32 sprpos[8];   /* hi16 = vstart, lo16 = xpos */
+   uae_s16 sprvstop[8];
 };
 
 static struct uprough_chipset_snapshot g_uprough_chipset_snapshot;
@@ -9227,6 +9318,13 @@ extern uae_u16 uprough_chip_get_bplcon1(void);
 extern uae_u16 uprough_chip_get_bplcon2(void);
 extern uae_u16 uprough_chip_get_bplcon3(void);
 extern uae_u32 uprough_chip_get_bplpt(int i);
+extern uae_s16 uprough_chip_get_bpl1mod(void);
+extern uae_s16 uprough_chip_get_bpl2mod(void);
+extern uae_u16 uprough_chip_get_fmode(void);
+extern uae_u32 uprough_chip_get_sprpt(int i);
+extern uae_s32 uprough_chip_get_sprpos(int i);
+extern uae_s16 uprough_chip_get_sprvstop(int i);
+extern uae_u32 uprough_chip_get_color(int idx);
 
 void *uprough_get_chipset_regs(void)
 {
@@ -9246,7 +9344,27 @@ void *uprough_get_chipset_regs(void)
    for (int i = 0; i < 8; i++) {
       g_uprough_chipset_snapshot.bplpt[i] = uprough_chip_get_bplpt(i);
    }
+   g_uprough_chipset_snapshot.bpl1mod = uprough_chip_get_bpl1mod();
+   g_uprough_chipset_snapshot.bpl2mod = uprough_chip_get_bpl2mod();
+   g_uprough_chipset_snapshot.fmode   = uprough_chip_get_fmode();
+   g_uprough_chipset_snapshot.pad0    = 0;
+   for (int i = 0; i < 8; i++) {
+      g_uprough_chipset_snapshot.sprpt[i]   = uprough_chip_get_sprpt(i);
+      g_uprough_chipset_snapshot.sprpos[i]  = uprough_chip_get_sprpos(i);
+      g_uprough_chipset_snapshot.sprvstop[i] = uprough_chip_get_sprvstop(i);
+   }
    return &g_uprough_chipset_snapshot;
+}
+
+/* Palette read: fills a caller-provided buffer with up to 256 colors,
+ * returns count. Each color is a u32 in AGA 24-bit RGB form
+ * (0x00RRGGBB). For ECS the upper bits are 0; same packing both ways. */
+size_t uprough_get_palette(uae_u32 *out, size_t cap)
+{
+   if (!out) return 0;
+   size_t n = (cap > 256) ? 256 : cap;
+   for (size_t i = 0; i < n; i++) out[i] = uprough_chip_get_color((int)i);
+   return n;
 }
 
 size_t uprough_chipset_snapshot_size(void)
