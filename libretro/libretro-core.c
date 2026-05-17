@@ -9416,6 +9416,10 @@ void uprough_copper_get_state(uae_u32 *out)
    out[5] = (uae_u32)uprough_chip_get_copper_hcmp();
 }
 
+/* Blitter snapshot. 24 u32 — see uprough_blitter_get_state in
+ * blitter.c for layout. */
+extern void uprough_blitter_get_state(uae_u32 *out);
+
 /* Palette read: fills a caller-provided buffer with up to 256 colors,
  * returns count. Each color is a u32 in AGA 24-bit RGB form
  * (0x00RRGGBB). For ECS the upper bits are 0; same packing both ways. */

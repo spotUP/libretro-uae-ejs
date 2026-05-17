@@ -2597,3 +2597,36 @@ uae_u8 *save_blitter_new(size_t *len, uae_u8 *dstptr)
 }
 
 #endif /* SAVESTATE */
+
+/* uprough-debug: blitter live state. Includes the register set
+ * (BLTCON0/1, BLTxPT, BLTxMOD, BLTxFWM/LWM, BLTxDAT) plus blt_info
+ * fields we have visibility on (vsize/hsize, blit_pending). */
+void uprough_blitter_get_state(uae_u32 *out)
+{
+   if (!out) return;
+   out[0]  = (uae_u32)bltcon0;
+   out[1]  = (uae_u32)bltcon1;
+   out[2]  = bltapt;
+   out[3]  = bltbpt;
+   out[4]  = bltcpt;
+   out[5]  = bltdpt;
+   out[6]  = (uae_u32)blt_info.bltadat;
+   out[7]  = (uae_u32)blt_info.bltbdat;
+   out[8]  = (uae_u32)blt_info.bltcdat;
+   out[9]  = (uae_u32)blt_info.bltddat;
+   out[10] = (uae_u32)blt_info.bltafwm;
+   out[11] = (uae_u32)blt_info.bltalwm;
+   out[12] = (uae_u32)blt_info.vblitsize;
+   out[13] = (uae_u32)blt_info.hblitsize;
+   out[14] = (uae_u32)blt_info.bltamod;
+   out[15] = (uae_u32)blt_info.bltbmod;
+   out[16] = (uae_u32)blt_info.bltcmod;
+   out[17] = (uae_u32)blt_info.bltdmod;
+   out[18] = (uae_u32)blt_info.blit_main;
+   out[19] = (uae_u32)blt_info.blit_finald;
+   out[20] = (uae_u32)blt_info.blit_pending;
+   out[21] = (uae_u32)blt_info.blitzero;
+   out[22] = (uae_u32)blt_info.blitter_nasty;
+   out[23] = (uae_u32)blt_info.blitter_dangerous_bpl;
+}
+
