@@ -17184,3 +17184,12 @@ static void SET_LINE_CYCLEBASED(int hpos)
 	decide_line(hpos);
 	decide_fetch_safe(hpos);
 }
+
+/* uprough-debug accessors: expose file-static chipset globals so
+ * libretro-core.c can build a chipset snapshot for the JS bridge. */
+uae_u32 uprough_chip_get_cop1lc(void)  { return cop1lc; }
+uae_u32 uprough_chip_get_cop2lc(void)  { return cop2lc; }
+uae_u16 uprough_chip_get_bplcon1(void) { return bplcon1; }
+uae_u16 uprough_chip_get_bplcon2(void) { return bplcon2; }
+uae_u16 uprough_chip_get_bplcon3(void) { return bplcon3; }
+uae_u32 uprough_chip_get_bplpt(int i)  { return (i >= 0 && i < MAX_PLANES) ? bplpt[i] : 0; }

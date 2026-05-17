@@ -221,10 +221,14 @@ else ifeq ($(platform), emscripten)
    STATIC_LINKING_LINK=1
    NO_LIBRETRO_VFS=1
    ifeq ($(EMULATORJS_THREADS), 1)
+      # -pthread alone in emscripten 4.0.16 enables atomics but not always
+      # bulk-memory; wasm-ld then rejects --shared-memory. Add the LLVM
+      # target features explicitly so every .o records both, which lets
+      # the threaded RetroArch link succeed.
       LDFLAGS += -pthread
-      PLATFLAGS += -pthread
-      CFLAGS += -pthread
-      CXXFLAGS += -pthread
+      PLATFLAGS += -pthread -matomics -mbulk-memory
+      CFLAGS += -pthread -matomics -mbulk-memory
+      CXXFLAGS += -pthread -matomics -mbulk-memory
    endif
 
 # iOS

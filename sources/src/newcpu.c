@@ -32,6 +32,12 @@ extern bool libretro_frame_end;
 #include "newcpu.h"
 #include "disasm.h"
 #include "cpummu.h"
+
+/* uprough-debug: per-instruction poll hook lives in libretro-core.c.
+ * Called from m68k_run_1 / m68k_run_2 below. Defined extern so the
+ * non-debug build still links (poll hook is always-present, just
+ * fast-paths to no-op when no halt/breakpoints are set). */
+extern void uprough_cpu_poll_hook(void);
 #include "cpummu030.h"
 #include "cputbl.h"
 #include "cpu_prefetch.h"
@@ -5002,6 +5008,7 @@ static void m68k_run_1 (void)
 		check_debugger();
 		TRY (prb) {
 			while (!exit) {
+				uprough_cpu_poll_hook();   /* uprough-debug: halt/step/bp */
 				r->opcode = r->ir;
 
 				count_instr (r->opcode);
@@ -5105,6 +5112,7 @@ static void m68k_run_1_ce (void)
 			}
 
 			while (!exit) {
+				uprough_cpu_poll_hook();   /* uprough-debug: halt/step/bp */
 				r->opcode = r->ir;
 
 #if DEBUG_CD32CDTVIO
@@ -6468,6 +6476,7 @@ static void m68k_run_2_000(void)
 		check_debugger();
 		TRY(prb) {
 			while (!exit) {
+				uprough_cpu_poll_hook();   /* uprough-debug: halt/step/bp */
 				r->instruction_pc = m68k_getpc ();
 
 				r->opcode = x_get_iword(0);
@@ -6513,6 +6522,7 @@ static void m68k_run_2_020(void)
 		check_debugger();
 		TRY(prb) {
 			while (!exit) {
+				uprough_cpu_poll_hook();   /* uprough-debug: halt/step/bp */
 				r->instruction_pc = m68k_getpc();
 
 				r->opcode = x_get_iword(0);

@@ -8885,6 +8885,422 @@ size_t retro_get_memory_size(unsigned id)
    return 0;
 }
 
+/* ------------------------------------------------------------------
+ * uprough debug exports
+ *
+ * Local additions for the LVLLVL-Amiga maker's MCP debugger
+ * (uprough-debug). These are NOT upstream libretro APIs — they
+ * read UAE-internal 68k CPU state directly so the JS bridge can
+ * surface registers / SR / halt-or-stopped flags without needing
+ * a full GDB stub.
+ *
+ * All functions are prefixed `uprough_` and must be added to
+ * EXPORTED_FUNCTIONS in emulatorjs-retroarch/Makefile.emscripten
+ * for emcc to keep them in the wasm.
+ * ------------------------------------------------------------------ */
+
+#include "newcpu.h"
+#include <emscripten.h>   /* emscripten_sleep — needed by halt spin */
+
+/* Layout matches the JS-side decoder in debugBridge.ts. Keep these
+ * in sync. uae_u32 fields are written via direct struct copy; the
+ * JS reads through HEAPU32 / HEAPI32 at the returned pointer. */
+struct uprough_cpu_snapshot {
+   uae_u32 d[8];            /* offset 0   */
+   uae_u32 a[8];            /* offset 32  */
+   uae_u32 pc;              /* offset 64  */
+   uae_u32 instruction_pc;  /* offset 68  */
+   uae_u32 usp;             /* offset 72  */
+   uae_u32 isp;             /* offset 76  */
+   uae_u32 msp;             /* offset 80  */
+   uae_u32 sr;              /* offset 84 (recomposed via MakeSR()) */
+   uae_u32 flags;           /* offset 88: bit0 stopped, bit1 halted, bit2 s, bit3 t1, bit4 t0, bit5 m */
+   uae_u32 intmask;         /* offset 92  */
+   uae_u32 exception;       /* offset 96  */
+   uae_u32 opcode;          /* offset 100 (last fetched opcode word, zero-extended) */
+};
+
+static struct uprough_cpu_snapshot g_uprough_cpu_snapshot;
+
+void *uprough_get_cpu_regs(void)
+{
+   /* Recompose SR from the split flag fields. MakeSR() writes
+    * regs.sr; safe to call from the main thread but NOT from inside
+    * an exception handler. The JS bridge calls this between frames,
+    * so we're safe in practice. */
+   MakeSR();
+
+   for (int i = 0; i < 8; i++) {
+      g_uprough_cpu_snapshot.d[i] = m68k_dreg(regs, i);
+      g_uprough_cpu_snapshot.a[i] = m68k_areg(regs, i);
+   }
+   g_uprough_cpu_snapshot.pc             = m68k_getpc();
+   g_uprough_cpu_snapshot.instruction_pc = regs.instruction_pc;
+   g_uprough_cpu_snapshot.usp            = regs.usp;
+   g_uprough_cpu_snapshot.isp            = regs.isp;
+   g_uprough_cpu_snapshot.msp            = regs.msp;
+   g_uprough_cpu_snapshot.sr             = regs.sr;
+   g_uprough_cpu_snapshot.flags          =
+        (regs.stopped ? 1u : 0u)
+      | (regs.halted  ? 2u : 0u)
+      | (regs.s       ? 4u : 0u)
+      | (regs.t1      ? 8u : 0u)
+      | (regs.t0      ? 16u : 0u)
+      | (regs.m       ? 32u : 0u);
+   g_uprough_cpu_snapshot.intmask        = (uae_u32)regs.intmask;
+   g_uprough_cpu_snapshot.exception      = (uae_u32)regs.exception;
+   g_uprough_cpu_snapshot.opcode         = (uae_u32)regs.opcode;
+
+   return &g_uprough_cpu_snapshot;
+}
+
+size_t uprough_cpu_snapshot_size(void)
+{
+   return sizeof(g_uprough_cpu_snapshot);
+}
+
+/* ------------------------------------------------------------------
+ * Halt / step / breakpoint state.
+ *
+ * These globals are driven from the JS bridge and polled from the
+ * 68k inner loop (m68k_run_1 / m68k_run_2 in newcpu.c — see
+ * uprough_cpu_poll_hook below).
+ *
+ * Thread safety: PUAE-WASM is built with pthreads; the 68k thread
+ * reads these globals while the JS main thread writes them. `volatile`
+ * is sufficient on wasm where aligned 32-bit reads/writes are atomic
+ * w.r.t. each other (we don't need acquire/release semantics here —
+ * eventual visibility within a few instructions is fine for an
+ * interactive debugger).
+ * ------------------------------------------------------------------ */
+
+#define UPROUGH_MAX_BP 64
+
+static volatile uae_u32 g_uprough_halt_req = 0;
+static volatile uae_u32 g_uprough_halted   = 0;
+static volatile uae_u32 g_uprough_step_req = 0;
+static volatile uae_u32 g_uprough_bp_pcs[UPROUGH_MAX_BP];
+static volatile uae_u32 g_uprough_bp_count = 0;
+
+/* The poll hook is called from newcpu.c on every m68k instruction
+ * (in the run-loop, before dispatch). Keep it lean: one volatile
+ * load + a likely-zero branch for the common (no breakpoints, not
+ * halted) case. Only hits the spin path when actually halted. */
+static inline int uprough_watch_check(void);   /* fwd decl, defined below */
+
+void uprough_cpu_poll_hook(void)
+{
+   /* Breakpoint check (skipped when list is empty — the common path). */
+   if (g_uprough_bp_count != 0) {
+      uae_u32 pc = m68k_getpc();
+      for (uae_u32 i = 0; i < g_uprough_bp_count; i++) {
+         if (g_uprough_bp_pcs[i] == pc) {
+            g_uprough_halt_req = 1;
+            break;
+         }
+      }
+   }
+
+   /* Watchpoint check (skipped when watch_len is 0 — common path).
+    * uprough_watch_check() is inlined and early-returns on len==0;
+    * cost in the no-watch case is one volatile load + branch. */
+   if (uprough_watch_check()) {
+      g_uprough_halt_req = 1;
+   }
+
+   if (!g_uprough_halt_req) {
+      g_uprough_halted = 0;
+      return;
+   }
+
+   /* Step request: consume one and allow this instruction to execute.
+    * The next call back into the hook will re-halt because halt_req
+    * is still 1. */
+   if (g_uprough_step_req) {
+      g_uprough_step_req = 0;
+      return;
+   }
+
+   /* Halt: yield until JS clears halt_req or sets step_req.
+    *
+    * `emscripten_sleep(1)` is the Asyncify-aware yield — it unwinds
+    * the wasm stack into JS, lets the JS event loop process MCP
+    * RPCs (including the JS that clears halt_req or sets step_req),
+    * then rewinds back into us when the 1ms is up. Without this
+    * the spin loop blocks the JS thread, hanging the maker. Note
+    * that audio also stops while halted: PUAE's RetroArch driver
+    * produces audio on the same thread as the CPU, so halting the
+    * CPU stops audio — expected behaviour for a debugger. */
+   g_uprough_halted = 1;
+   while (g_uprough_halt_req && !g_uprough_step_req) {
+      emscripten_sleep(1);
+   }
+   if (g_uprough_step_req) {
+      g_uprough_step_req = 0;
+      /* keep halt_req=1; we re-enter the hook after one instr and
+       * spin again. */
+   }
+   g_uprough_halted = 0;
+}
+
+/* JS-facing controls. */
+void uprough_set_halt(int v)         { g_uprough_halt_req = v ? 1u : 0u; }
+int  uprough_get_halted(void)        { return (int)g_uprough_halted; }
+int  uprough_get_halt_req(void)      { return (int)g_uprough_halt_req; }
+
+void uprough_step(int n)
+{
+   /* Single-step semantics: ensure we re-halt afterwards. n>1 is
+    * accepted but we only execute one instruction per poll; the
+    * caller should loop. */
+   (void)n;
+   g_uprough_halt_req = 1;
+   g_uprough_step_req = 1;
+}
+
+int uprough_set_breakpoint(uae_u32 pc)
+{
+   /* Idempotent: return existing slot if already set. */
+   for (uae_u32 i = 0; i < g_uprough_bp_count; i++) {
+      if (g_uprough_bp_pcs[i] == pc) return (int)i;
+   }
+   if (g_uprough_bp_count >= UPROUGH_MAX_BP) return -1;
+   g_uprough_bp_pcs[g_uprough_bp_count] = pc;
+   return (int)(g_uprough_bp_count++);
+}
+
+int uprough_clear_breakpoint(uae_u32 pc)
+{
+   for (uae_u32 i = 0; i < g_uprough_bp_count; i++) {
+      if (g_uprough_bp_pcs[i] == pc) {
+         g_uprough_bp_count--;
+         g_uprough_bp_pcs[i] = g_uprough_bp_pcs[g_uprough_bp_count];
+         return 1;
+      }
+   }
+   return 0;
+}
+
+void    uprough_clear_all_breakpoints(void)  { g_uprough_bp_count = 0; }
+void   *uprough_get_breakpoints_ptr(void)    { return (void *)g_uprough_bp_pcs; }
+uae_u32 uprough_get_breakpoint_count(void)   { return g_uprough_bp_count; }
+
+/* ------------------------------------------------------------------
+ * Register write. Modify 68k state while halted.
+ *
+ * idx: 0..7   = D0..D7
+ *      8..15  = A0..A7
+ *      16     = PC
+ *      17     = SR (writes split flags via standard SR decode)
+ *      18..20 = USP / ISP / MSP
+ *
+ * Returns 1 on success, 0 on out-of-range idx. Caller should halt
+ * the CPU first; writing while running races with the CPU thread.
+ * ------------------------------------------------------------------ */
+extern void MakeFromSR(void);
+
+int uprough_set_reg(unsigned idx, uae_u32 value)
+{
+   if (idx < 8) {
+      m68k_dreg(regs, idx) = value;
+      return 1;
+   }
+   if (idx < 16) {
+      m68k_areg(regs, idx - 8) = value;
+      return 1;
+   }
+   switch (idx) {
+      case 16: m68k_setpc(value); return 1;
+      case 17: regs.sr = (uae_u16)value; MakeFromSR(); return 1;
+      case 18: regs.usp = value; return 1;
+      case 19: regs.isp = value; return 1;
+      case 20: regs.msp = value; return 1;
+   }
+   return 0;
+}
+
+/* ------------------------------------------------------------------
+ * Memory watchpoints. UAE's `memory_access_check_*` hooks are deep
+ * inside the chipset emulation; instrumenting every put_byte/word/
+ * long would touch many sites and risk perf regressions in the
+ * chipset path.
+ *
+ * Pragmatic alternative: poll the watch window each instruction
+ * boundary from uprough_cpu_poll_hook. We keep a previous-snapshot
+ * buffer; if any byte in [watch_addr, watch_addr+watch_len) differs
+ * from the snapshot, we halt the CPU and refresh the snapshot so the
+ * resume doesn't immediately re-halt.
+ *
+ * Cap: UPROUGH_WATCH_MAX bytes. Larger ranges silently truncate. The
+ * snapshot lives in static BSS to keep the chip-RAM read path
+ * branch-free.
+ * ------------------------------------------------------------------ */
+#define UPROUGH_WATCH_MAX 4096
+
+static volatile uae_u32 g_uprough_watch_addr = 0;
+static volatile uae_u32 g_uprough_watch_len  = 0;
+static volatile uae_u32 g_uprough_watch_dirty = 1;     /* refresh snapshot on next poll */
+static uae_u8           g_uprough_watch_snap[UPROUGH_WATCH_MAX];
+
+int uprough_set_watch(uae_u32 addr, uae_u32 len)
+{
+   if (len > UPROUGH_WATCH_MAX) len = UPROUGH_WATCH_MAX;
+   g_uprough_watch_addr  = addr;
+   g_uprough_watch_len   = len;
+   g_uprough_watch_dirty = 1;
+   return 1;
+}
+
+void uprough_clear_watch(void)
+{
+   g_uprough_watch_addr  = 0;
+   g_uprough_watch_len   = 0;
+   g_uprough_watch_dirty = 1;
+}
+
+/* Compare current chipmem [addr, addr+len) against the snapshot.
+ * Returns 1 if any byte differs and refreshes the snapshot; 0 if
+ * no change. Inlined into the poll hook so the no-watch case (len=0)
+ * fast-paths to a single load + branch. */
+static inline int uprough_watch_check(void)
+{
+   uae_u32 len = g_uprough_watch_len;
+   if (len == 0) return 0;
+   uae_u32 addr = g_uprough_watch_addr;
+   if (addr >= chipmem_bank.allocated_size) return 0;
+   if (addr + len > chipmem_bank.allocated_size) len = chipmem_bank.allocated_size - addr;
+   const uae_u8 *src = chipmem_bank.baseaddr + addr;
+   if (g_uprough_watch_dirty) {
+      memcpy(g_uprough_watch_snap, src, len);
+      g_uprough_watch_dirty = 0;
+      return 0;
+   }
+   if (memcmp(g_uprough_watch_snap, src, len) != 0) {
+      memcpy(g_uprough_watch_snap, src, len);
+      return 1;
+   }
+   return 0;
+}
+
+/* ------------------------------------------------------------------
+ * Chipset register read. The chipset state lives in `custom.c`
+ * globals, not in chipmem_bank. Expose a small set of commonly-needed
+ * registers for debugging.
+ *
+ * We return them as a packed snapshot struct so JS can read in one
+ * shot (matches the cpu_regs pattern).
+ * ------------------------------------------------------------------ */
+struct uprough_chipset_snapshot {
+   uae_u32 vpos;        /* current vertical raster position */
+   uae_u32 hpos;        /* current horizontal raster position */
+   uae_u32 cop1lc;
+   uae_u32 cop2lc;
+   uae_u32 copper_pc;   /* live copper PC */
+   uae_u16 intena;
+   uae_u16 intreq;
+   uae_u16 dmacon;
+   uae_u16 adkcon;
+   uae_u16 bplcon0;
+   uae_u16 bplcon1;
+   uae_u16 bplcon2;
+   uae_u16 bplcon3;
+   uae_u32 bplpt[8];    /* BPL1PT..BPL8PT */
+};
+
+static struct uprough_chipset_snapshot g_uprough_chipset_snapshot;
+
+/* UAE exposes vpos/intena/intreq via custom.h. The rest are file-
+ * static in custom.c — we add small accessors there (see
+ * uprough_chip_get_*). bplcon0/dmacon/adkcon are file-scope (not
+ * static) and we can extern them. */
+extern int current_hpos(void);
+extern int vpos;
+extern uae_u16 intena, intreq;
+extern uae_u16 dmacon;
+extern uae_u16 adkcon;
+/* bplcon0 already declared at file top as `extern int` (line 61) — the
+ * actual storage is uae_u16 but the codebase reads it as int. Cast on
+ * assign below. */
+extern uae_u32 uprough_chip_get_cop1lc(void);
+extern uae_u32 uprough_chip_get_cop2lc(void);
+extern uae_u16 uprough_chip_get_bplcon1(void);
+extern uae_u16 uprough_chip_get_bplcon2(void);
+extern uae_u16 uprough_chip_get_bplcon3(void);
+extern uae_u32 uprough_chip_get_bplpt(int i);
+
+void *uprough_get_chipset_regs(void)
+{
+   g_uprough_chipset_snapshot.vpos      = (uae_u32)vpos;
+   g_uprough_chipset_snapshot.hpos      = (uae_u32)current_hpos();
+   g_uprough_chipset_snapshot.cop1lc    = uprough_chip_get_cop1lc();
+   g_uprough_chipset_snapshot.cop2lc    = uprough_chip_get_cop2lc();
+   g_uprough_chipset_snapshot.copper_pc = 0;
+   g_uprough_chipset_snapshot.intena    = intena;
+   g_uprough_chipset_snapshot.intreq    = intreq;
+   g_uprough_chipset_snapshot.dmacon    = dmacon;
+   g_uprough_chipset_snapshot.adkcon    = adkcon;
+   g_uprough_chipset_snapshot.bplcon0   = (uae_u16)bplcon0;
+   g_uprough_chipset_snapshot.bplcon1   = uprough_chip_get_bplcon1();
+   g_uprough_chipset_snapshot.bplcon2   = uprough_chip_get_bplcon2();
+   g_uprough_chipset_snapshot.bplcon3   = uprough_chip_get_bplcon3();
+   for (int i = 0; i < 8; i++) {
+      g_uprough_chipset_snapshot.bplpt[i] = uprough_chip_get_bplpt(i);
+   }
+   return &g_uprough_chipset_snapshot;
+}
+
+size_t uprough_chipset_snapshot_size(void)
+{
+   return sizeof(g_uprough_chipset_snapshot);
+}
+
+/* ------------------------------------------------------------------
+ * Memory write. Direct memcpy into chipmem; bypasses chipset write
+ * hooks (intentional — debugger pokes should not trigger custom-reg
+ * side effects). Bounds-checked against chipmem_bank.allocated_size.
+ * ------------------------------------------------------------------ */
+size_t uprough_write_memory(uae_u32 addr, const void *src, size_t n)
+{
+   if (addr >= chipmem_bank.allocated_size) return 0;
+   size_t avail = (size_t)chipmem_bank.allocated_size - (size_t)addr;
+   if (n > avail) n = avail;
+   memcpy(chipmem_bank.baseaddr + addr, src, n);
+   return n;
+}
+
+/* ------------------------------------------------------------------
+ * Disassembly. Wraps UAE's sm68k_disasm (in disasm.c) to fill a
+ * caller-supplied buffer with N instructions, one per line. Returns
+ * bytes written (excluding terminator).
+ * ------------------------------------------------------------------ */
+extern void sm68k_disasm (char *instrname, char *instrcode, uaecptr addr, uaecptr *nextpc, uaecptr lastpc);
+
+size_t uprough_disasm(uae_u32 pc, char *out, size_t cap, int n_insns)
+{
+   if (!out || cap < 32) return 0;
+   if (n_insns < 1) n_insns = 1;
+   if (n_insns > 32) n_insns = 32;
+
+   char name[256];
+   char code[256];
+   size_t off = 0;
+   uaecptr cur = (uaecptr)pc;
+   uaecptr next = cur;
+
+   for (int i = 0; i < n_insns && off + 64 < cap; i++) {
+      name[0] = 0;
+      code[0] = 0;
+      sm68k_disasm(name, code, cur, &next, 0);
+      int n = snprintf(out + off, cap - off, "%08X: %-24s %s\n",
+                       (unsigned)cur, code, name);
+      if (n < 0) break;
+      off += (size_t)n;
+      if (next <= cur) break; /* safety: prevent infinite loop on bad addr */
+      cur = next;
+   }
+   return off;
+}
+
 void retro_cheat_reset(void) {}
 
 void retro_cheat_set(unsigned index, bool enabled, const char *code)
