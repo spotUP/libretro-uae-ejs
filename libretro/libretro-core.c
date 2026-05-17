@@ -9405,6 +9405,39 @@ extern uae_u32 uprough_chip_get_copper_state(void);
 extern uae_s32 uprough_chip_get_copper_vcmp(void);
 extern uae_s32 uprough_chip_get_copper_hcmp(void);
 
+/* CIA snapshot. Reads 16 u32 from CIAA (num=0) or CIAB (num=1). */
+extern void uprough_cia_get_state(int num, uae_u32 *out);
+
+void uprough_get_cia(int num, uae_u32 *out)
+{
+   uprough_cia_get_state(num, out);
+}
+
+/* UAE config snapshot. Returns 8 u32:
+ *   [0] cpu_model      (68000/010/020/030/040/060)
+ *   [1] chipset_mask   (OCS/ECS_AGNUS/ECS_DENISE/AGA — bit-or)
+ *   [2] cpu_compatible
+ *   [3] cpu_cycle_exact
+ *   [4] chipmem_size
+ *   [5] fastmem_size
+ *   [6] kickstart_rev  (sha1_hash[0] proxy — best-effort)
+ *   [7] frame counter (vsync count since boot)
+ */
+/* vsync_counter is declared as uae_u32 in custom.h — just include it
+ * transitively via the existing path. No extern needed here. */
+void uprough_get_uae_config(uae_u32 *out)
+{
+   if (!out) return;
+   out[0] = (uae_u32)currprefs.cpu_model;
+   out[1] = (uae_u32)currprefs.chipset_mask;
+   out[2] = (uae_u32)currprefs.cpu_compatible;
+   out[3] = (uae_u32)currprefs.cpu_cycle_exact;
+   out[4] = (uae_u32)currprefs.chipmem.size;
+   out[5] = (uae_u32)currprefs.fastmem[0].size;
+   out[6] = 0;  /* TODO: hash kickstart bytes if needed */
+   out[7] = (uae_u32)vsync_counter;
+}
+
 void uprough_copper_get_state(uae_u32 *out)
 {
    if (!out) return;

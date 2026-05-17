@@ -3120,3 +3120,45 @@ uae_u8 *restore_keyboard(uae_u8 *src)
 }
 
 #endif /* SAVESTATE */
+
+/* uprough-debug: per-CIA snapshot. num: 0=CIAA, 1=CIAB. Returns
+ * 16 u32 fields:
+ *   [0..1]  Timer A: timer, latch
+ *   [2..3]  Timer B: timer, latch
+ *   [4]     TOD
+ *   [5]     ALARM
+ *   [6]     PRA  (port A)
+ *   [7]     PRB  (port B)
+ *   [8]     DRA  (port A data direction)
+ *   [9]     DRB  (port B data direction)
+ *   [10]    ICR1 (interrupt control flags)
+ *   [11]    ICR2
+ *   [12]    IMASK
+ *   [13]    SDR
+ *   [14]    Timer A CR
+ *   [15]    Timer B CR
+ */
+void uprough_cia_get_state(int num, uae_u32 *out)
+{
+   if (num < 0 || num > 1 || !out) {
+      if (out) for (int i = 0; i < 16; i++) out[i] = 0;
+      return;
+   }
+   struct CIA *c = &cia[num];
+   out[0]  = c->t[0].timer;
+   out[1]  = c->t[0].latch;
+   out[2]  = c->t[1].timer;
+   out[3]  = c->t[1].latch;
+   out[4]  = c->tod;
+   out[5]  = c->alarm;
+   out[6]  = c->pra;
+   out[7]  = c->prb;
+   out[8]  = c->dra;
+   out[9]  = c->drb;
+   out[10] = c->icr1;
+   out[11] = c->icr2;
+   out[12] = c->imask;
+   out[13] = c->sdr;
+   out[14] = c->t[0].cr;
+   out[15] = c->t[1].cr;
+}
