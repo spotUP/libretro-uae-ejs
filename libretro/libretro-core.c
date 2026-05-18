@@ -9017,6 +9017,37 @@ static volatile uae_u32 g_uprough_trace_enabled = 0;
 void uprough_trace_set_enabled(int v) { g_uprough_trace_enabled = v ? 1u : 0u; }
 int  uprough_trace_get_enabled(void)  { return (int)g_uprough_trace_enabled; }
 
+/* Per-instruction regs ring — like the PC trace ring but stores
+ * full register state. 32 entries × 18 u32 (D0..D7, A0..A7, SR, PC)
+ * = 2.3 KB BSS. Cheaper than chipmem snapshots but enables
+ * "what were D0/A0 N instructions ago" retrospective debugging.
+ *
+ * Format per slot (18 u32):
+ *   [0..7]   D0..D7
+ *   [8..15]  A0..A7
+ *   [16]     SR (raw, not recomposed)
+ *   [17]     PC
+ */
+#define UPROUGH_REGS_RING_LEN 32
+#define UPROUGH_REGS_RING_MASK (UPROUGH_REGS_RING_LEN - 1)
+#define UPROUGH_REGS_SLOT_U32 18
+static volatile uae_u32 g_uprough_regs_ring[UPROUGH_REGS_RING_LEN * UPROUGH_REGS_SLOT_U32];
+static volatile uae_u32 g_uprough_regs_ring_head = 0;
+static volatile uae_u32 g_uprough_regs_ring_enabled = 0;
+
+void uprough_regs_ring_set_enabled(int v) { g_uprough_regs_ring_enabled = v ? 1u : 0u; }
+int  uprough_regs_ring_get_enabled(void)  { return (int)g_uprough_regs_ring_enabled; }
+void uprough_regs_ring_clear(void)
+{
+   for (uae_u32 i = 0; i < UPROUGH_REGS_RING_LEN * UPROUGH_REGS_SLOT_U32; i++)
+      g_uprough_regs_ring[i] = 0;
+   g_uprough_regs_ring_head = 0;
+}
+void   *uprough_regs_ring_get_ptr(void)      { return (void *)g_uprough_regs_ring; }
+uae_u32 uprough_regs_ring_get_head(void)     { return g_uprough_regs_ring_head; }
+uae_u32 uprough_regs_ring_get_capacity(void) { return UPROUGH_REGS_RING_LEN; }
+uae_u32 uprough_regs_ring_get_slot_u32(void) { return UPROUGH_REGS_SLOT_U32; }
+
 void uprough_trace_clear(void)
 {
    for (uae_u32 i = 0; i < UPROUGH_TRACE_LEN; i++) g_uprough_trace_pcs[i] = 0;
@@ -9091,6 +9122,21 @@ void uprough_cpu_poll_hook(void)
       uae_u32 h = g_uprough_trace_head;
       g_uprough_trace_pcs[h & UPROUGH_TRACE_MASK] = pc;
       g_uprough_trace_head = h + 1;
+   }
+
+   /* Regs ring — full register state per instruction. ~30x more
+    * expensive than the PC ring write but still negligible (~20
+    * stores per insn). Disabled by default. */
+   if (g_uprough_regs_ring_enabled) {
+      uae_u32 h = g_uprough_regs_ring_head & UPROUGH_REGS_RING_MASK;
+      uae_u32 base = h * UPROUGH_REGS_SLOT_U32;
+      for (int i = 0; i < 8; i++) {
+         g_uprough_regs_ring[base + i]     = m68k_dreg(regs, i);
+         g_uprough_regs_ring[base + 8 + i] = m68k_areg(regs, i);
+      }
+      g_uprough_regs_ring[base + 16] = regs.sr;
+      g_uprough_regs_ring[base + 17] = pc;
+      g_uprough_regs_ring_head = (g_uprough_regs_ring_head + 1) & 0xffffffff;
    }
 
    /* Exception catchpoint: regs.exception is non-zero during the
