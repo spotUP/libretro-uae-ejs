@@ -9062,63 +9062,87 @@ uae_u32 uprough_regs_ring_get_slot_u32(void) { return UPROUGH_REGS_SLOT_U32; }
  * is NOT — restore will glitch the visual + audio for a frame
  * or two. Sufficient for CPU-level debugging.
  * ------------------------------------------------------------------ */
-#define UPROUGH_CHIPMEM_MAX (2 * 1024 * 1024)  /* 2 MB cap; A1200 max chip RAM */
+#define UPROUGH_CHIPMEM_MAX (2 * 1024 * 1024)   /* 2 MB cap */
+#define UPROUGH_SNAP_SLOTS  4                    /* ring of N slots */
 
-static uae_u8 g_uprough_snap_chipmem[UPROUGH_CHIPMEM_MAX];
-static uae_u32 g_uprough_snap_chipmem_len = 0;
-static struct {
+struct uprough_snap_slot {
+   uae_u8  chipmem[UPROUGH_CHIPMEM_MAX];
+   uae_u32 chipmem_len;
    uae_u32 d[8];
    uae_u32 a[8];
    uae_u32 pc;
    uae_u32 usp, isp, msp;
    uae_u32 sr;
    uae_u32 vbr;
-} g_uprough_snap_regs;
-static volatile uae_u32 g_uprough_snap_valid = 0;
+   uae_u32 valid;
+};
 
-int uprough_state_save(void)
+static struct uprough_snap_slot g_uprough_snap[UPROUGH_SNAP_SLOTS];
+
+int uprough_state_save_slot(int slot)
 {
+   if (slot < 0 || slot >= UPROUGH_SNAP_SLOTS) return 0;
+   struct uprough_snap_slot *s = &g_uprough_snap[slot];
    uae_u32 sz = chipmem_bank.allocated_size;
    if (sz > UPROUGH_CHIPMEM_MAX) sz = UPROUGH_CHIPMEM_MAX;
-   memcpy(g_uprough_snap_chipmem, chipmem_bank.baseaddr, sz);
-   g_uprough_snap_chipmem_len = sz;
+   memcpy(s->chipmem, chipmem_bank.baseaddr, sz);
+   s->chipmem_len = sz;
    for (int i = 0; i < 8; i++) {
-      g_uprough_snap_regs.d[i] = m68k_dreg(regs, i);
-      g_uprough_snap_regs.a[i] = m68k_areg(regs, i);
+      s->d[i] = m68k_dreg(regs, i);
+      s->a[i] = m68k_areg(regs, i);
    }
    MakeSR();
-   g_uprough_snap_regs.pc  = m68k_getpc();
-   g_uprough_snap_regs.usp = regs.usp;
-   g_uprough_snap_regs.isp = regs.isp;
-   g_uprough_snap_regs.msp = regs.msp;
-   g_uprough_snap_regs.sr  = regs.sr;
-   g_uprough_snap_regs.vbr = regs.vbr;
-   g_uprough_snap_valid = 1;
+   s->pc  = m68k_getpc();
+   s->usp = regs.usp;
+   s->isp = regs.isp;
+   s->msp = regs.msp;
+   s->sr  = regs.sr;
+   s->vbr = regs.vbr;
+   s->valid = 1;
    return 1;
 }
 
-int uprough_state_restore(void)
+int uprough_state_restore_slot(int slot)
 {
-   if (!g_uprough_snap_valid) return 0;
-   uae_u32 sz = g_uprough_snap_chipmem_len;
+   if (slot < 0 || slot >= UPROUGH_SNAP_SLOTS) return 0;
+   struct uprough_snap_slot *s = &g_uprough_snap[slot];
+   if (!s->valid) return 0;
+   uae_u32 sz = s->chipmem_len;
    if (sz > chipmem_bank.allocated_size) sz = chipmem_bank.allocated_size;
-   memcpy(chipmem_bank.baseaddr, g_uprough_snap_chipmem, sz);
+   memcpy(chipmem_bank.baseaddr, s->chipmem, sz);
    for (int i = 0; i < 8; i++) {
-      m68k_dreg(regs, i) = g_uprough_snap_regs.d[i];
-      m68k_areg(regs, i) = g_uprough_snap_regs.a[i];
+      m68k_dreg(regs, i) = s->d[i];
+      m68k_areg(regs, i) = s->a[i];
    }
-   regs.usp = g_uprough_snap_regs.usp;
-   regs.isp = g_uprough_snap_regs.isp;
-   regs.msp = g_uprough_snap_regs.msp;
-   regs.sr  = (uae_u16)g_uprough_snap_regs.sr;
-   regs.vbr = g_uprough_snap_regs.vbr;
+   regs.usp = s->usp;
+   regs.isp = s->isp;
+   regs.msp = s->msp;
+   regs.sr  = (uae_u16)s->sr;
+   regs.vbr = s->vbr;
    MakeFromSR();
-   m68k_setpc(g_uprough_snap_regs.pc);
+   m68k_setpc(s->pc);
    return 1;
 }
 
-int uprough_state_is_saved(void) { return (int)g_uprough_snap_valid; }
-void uprough_state_clear(void)   { g_uprough_snap_valid = 0; }
+int uprough_state_is_saved_slot(int slot)
+{
+   if (slot < 0 || slot >= UPROUGH_SNAP_SLOTS) return 0;
+   return (int)g_uprough_snap[slot].valid;
+}
+
+void uprough_state_clear_slot(int slot)
+{
+   if (slot < 0 || slot >= UPROUGH_SNAP_SLOTS) return;
+   g_uprough_snap[slot].valid = 0;
+}
+
+int uprough_state_slot_count(void) { return UPROUGH_SNAP_SLOTS; }
+
+/* Backwards-compat wrappers: original single-slot API uses slot 0. */
+int  uprough_state_save(void)     { return uprough_state_save_slot(0); }
+int  uprough_state_restore(void)  { return uprough_state_restore_slot(0); }
+int  uprough_state_is_saved(void) { return uprough_state_is_saved_slot(0); }
+void uprough_state_clear(void)    { uprough_state_clear_slot(0); }
 
 /* ------------------------------------------------------------------
  * MMU / cache control regs — read-only snapshot for 020+ targets.

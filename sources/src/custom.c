@@ -17218,6 +17218,11 @@ uae_u32 uprough_chip_get_copper_state(void) { return (uae_u32)cop_state.state; }
 uae_s32 uprough_chip_get_copper_vcmp(void)  { return cop_state.vcmp; }
 uae_s32 uprough_chip_get_copper_hcmp(void)  { return cop_state.hcmp; }
 
+/* (No setter for cop_state — chipset restore is too risky without
+ *  also reseting blitter / audio cursors / CIA timers consistently.
+ *  Snapshot restore in libretro-core.c restores only chipmem+regs;
+ *  chipset state stays at "now", with ~1-2 frames of visual glitch.) */
+
 /* Sprite vstart/vstop/xpos — useful to confirm sprite Y-positioning. */
 uae_s32 uprough_chip_get_sprpos(int i)
 {
