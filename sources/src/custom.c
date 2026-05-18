@@ -17218,10 +17218,73 @@ uae_u32 uprough_chip_get_copper_state(void) { return (uae_u32)cop_state.state; }
 uae_s32 uprough_chip_get_copper_vcmp(void)  { return cop_state.vcmp; }
 uae_s32 uprough_chip_get_copper_hcmp(void)  { return cop_state.hcmp; }
 
-/* (No setter for cop_state — chipset restore is too risky without
- *  also reseting blitter / audio cursors / CIA timers consistently.
- *  Snapshot restore in libretro-core.c restores only chipmem+regs;
- *  chipset state stays at "now", with ~1-2 frames of visual glitch.) */
+/* Coordinated chipset state save/restore for the snapshot system.
+ * RISK: UAE's chipset emulation has many internal invariants
+ * across these globals — direct writes can produce visual glitches
+ * worse than no-restore. Restoring only the most-impactful primary
+ * state (copper IP + current instruction words, BPLnPT, current
+ * frame palette) gives most of the visual continuity for a 1-frame
+ * glitch reduction. We intentionally do NOT restore audio DMA
+ * cursors (Paula picks up from chipmem) or CIA timer state (the
+ * timer phase is millisecond-scale and not visually relevant). */
+
+/* Chipset snapshot — pack the most-visually-impactful chipset
+ * state into a u32 array for save/restore. */
+void uprough_chip_save_state(uae_u32 *out)
+{
+   if (!out) return;
+   out[0]  = (uae_u32)cop_state.ip;
+   out[1]  = (uae_u32)cop_state.ir[0];
+   out[2]  = (uae_u32)cop_state.ir[1];
+   out[3]  = (uae_u32)cop_state.state;
+   out[4]  = cop1lc;
+   out[5]  = cop2lc;
+   out[6]  = (uae_u32)bplcon0;
+   out[7]  = (uae_u32)bplcon1;
+   out[8]  = (uae_u32)bplcon2;
+   out[9]  = (uae_u32)bplcon3;
+   out[10] = (uae_u32)dmacon;
+   out[11] = (uae_u32)intena;
+   out[12] = (uae_u32)intreq;
+   out[13] = (uae_u32)adkcon;
+   for (int i = 0; i < 8; i++) {
+      out[14 + i] = (uae_u32)((i < MAX_PLANES) ? bplpt[i] : 0u);
+   }
+   /* AGA palette snapshot — first 32 colors. */
+   for (int i = 0; i < 32; i++) {
+      out[22 + i] = (uae_u32)color_reg_get(&current_colors, i);
+   }
+}
+
+/* Restore mirrors save. WARNING: UAE doesn't expose setters for
+ * bplcon0/dmacon/etc. that update derived state. We write directly
+ * to the globals; UAE will re-derive on the next chipset cycle. */
+void uprough_chip_restore_state(const uae_u32 *in)
+{
+   if (!in) return;
+   cop_state.ip = (uaecptr)in[0];
+   cop_state.ir[0] = (uae_u16)in[1];
+   cop_state.ir[1] = (uae_u16)in[2];
+   cop_state.state = (enum copper_states)in[3];
+   cop1lc = in[4];
+   cop2lc = in[5];
+   bplcon0 = (uae_u16)in[6];
+   bplcon1 = (uae_u16)in[7];
+   bplcon2 = (uae_u16)in[8];
+   bplcon3 = (uae_u16)in[9];
+   dmacon = (uae_u16)in[10];
+   intena = (uae_u16)in[11];
+   intreq = (uae_u16)in[12];
+   adkcon = (uae_u16)in[13];
+   for (int i = 0; i < 8 && i < MAX_PLANES; i++) {
+      bplpt[i] = (uaecptr)in[14 + i];
+   }
+   for (int i = 0; i < 32; i++) {
+      color_reg_set(&current_colors, i, (int)in[22 + i]);
+   }
+}
+
+uae_u32 uprough_chip_state_size_u32(void) { return 54; }
 
 /* Sprite vstart/vstop/xpos — useful to confirm sprite Y-positioning. */
 uae_s32 uprough_chip_get_sprpos(int i)

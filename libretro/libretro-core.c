@@ -9064,6 +9064,11 @@ uae_u32 uprough_regs_ring_get_slot_u32(void) { return UPROUGH_REGS_SLOT_U32; }
  * ------------------------------------------------------------------ */
 #define UPROUGH_CHIPMEM_MAX (2 * 1024 * 1024)   /* 2 MB cap */
 #define UPROUGH_SNAP_SLOTS  4                    /* ring of N slots */
+#define UPROUGH_CHIP_STATE_SIZE_U32 54           /* matches custom.c */
+
+extern void uprough_chip_save_state(uae_u32 *out);
+extern void uprough_chip_restore_state(const uae_u32 *in);
+extern uae_u32 uprough_chip_state_size_u32(void);
 
 struct uprough_snap_slot {
    uae_u8  chipmem[UPROUGH_CHIPMEM_MAX];
@@ -9074,6 +9079,7 @@ struct uprough_snap_slot {
    uae_u32 usp, isp, msp;
    uae_u32 sr;
    uae_u32 vbr;
+   uae_u32 chip_state[UPROUGH_CHIP_STATE_SIZE_U32];
    uae_u32 valid;
 };
 
@@ -9098,6 +9104,8 @@ int uprough_state_save_slot(int slot)
    s->msp = regs.msp;
    s->sr  = regs.sr;
    s->vbr = regs.vbr;
+   /* Chipset state snapshot — copper IP/IR, BPLCON, BPLnPT, palette… */
+   uprough_chip_save_state(s->chip_state);
    s->valid = 1;
    return 1;
 }
@@ -9110,6 +9118,9 @@ int uprough_state_restore_slot(int slot)
    uae_u32 sz = s->chipmem_len;
    if (sz > chipmem_bank.allocated_size) sz = chipmem_bank.allocated_size;
    memcpy(chipmem_bank.baseaddr, s->chipmem, sz);
+   /* Chipset restore — direct global writes. UAE may produce minor
+    * visual artefact for 1 line as derived state catches up. */
+   uprough_chip_restore_state(s->chip_state);
    for (int i = 0; i < 8; i++) {
       m68k_dreg(regs, i) = s->d[i];
       m68k_areg(regs, i) = s->a[i];
