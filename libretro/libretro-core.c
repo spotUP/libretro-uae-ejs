@@ -9048,6 +9048,101 @@ uae_u32 uprough_regs_ring_get_head(void)     { return g_uprough_regs_ring_head; 
 uae_u32 uprough_regs_ring_get_capacity(void) { return UPROUGH_REGS_RING_LEN; }
 uae_u32 uprough_regs_ring_get_slot_u32(void) { return UPROUGH_REGS_SLOT_U32; }
 
+/* ------------------------------------------------------------------
+ * State snapshot — capture { regs, full chipmem } into a single
+ * buffer + restore back. Enables primitive reverse-execution: save
+ * before a step series, observe consequences, restore to undo.
+ *
+ * Storage: one slot. ~512 KB chipmem + ~80 bytes regs. Could be
+ * extended to a ring of slots if useful; one slot covers the
+ * "checkpoint and restore" use case.
+ *
+ * Limitations: ONLY chipmem + 68k regs are saved. Chipset state
+ * (copper FSM, blitter pipeline, audio DMA cursors, CIA timers)
+ * is NOT — restore will glitch the visual + audio for a frame
+ * or two. Sufficient for CPU-level debugging.
+ * ------------------------------------------------------------------ */
+#define UPROUGH_CHIPMEM_MAX (2 * 1024 * 1024)  /* 2 MB cap; A1200 max chip RAM */
+
+static uae_u8 g_uprough_snap_chipmem[UPROUGH_CHIPMEM_MAX];
+static uae_u32 g_uprough_snap_chipmem_len = 0;
+static struct {
+   uae_u32 d[8];
+   uae_u32 a[8];
+   uae_u32 pc;
+   uae_u32 usp, isp, msp;
+   uae_u32 sr;
+   uae_u32 vbr;
+} g_uprough_snap_regs;
+static volatile uae_u32 g_uprough_snap_valid = 0;
+
+int uprough_state_save(void)
+{
+   uae_u32 sz = chipmem_bank.allocated_size;
+   if (sz > UPROUGH_CHIPMEM_MAX) sz = UPROUGH_CHIPMEM_MAX;
+   memcpy(g_uprough_snap_chipmem, chipmem_bank.baseaddr, sz);
+   g_uprough_snap_chipmem_len = sz;
+   for (int i = 0; i < 8; i++) {
+      g_uprough_snap_regs.d[i] = m68k_dreg(regs, i);
+      g_uprough_snap_regs.a[i] = m68k_areg(regs, i);
+   }
+   MakeSR();
+   g_uprough_snap_regs.pc  = m68k_getpc();
+   g_uprough_snap_regs.usp = regs.usp;
+   g_uprough_snap_regs.isp = regs.isp;
+   g_uprough_snap_regs.msp = regs.msp;
+   g_uprough_snap_regs.sr  = regs.sr;
+   g_uprough_snap_regs.vbr = regs.vbr;
+   g_uprough_snap_valid = 1;
+   return 1;
+}
+
+int uprough_state_restore(void)
+{
+   if (!g_uprough_snap_valid) return 0;
+   uae_u32 sz = g_uprough_snap_chipmem_len;
+   if (sz > chipmem_bank.allocated_size) sz = chipmem_bank.allocated_size;
+   memcpy(chipmem_bank.baseaddr, g_uprough_snap_chipmem, sz);
+   for (int i = 0; i < 8; i++) {
+      m68k_dreg(regs, i) = g_uprough_snap_regs.d[i];
+      m68k_areg(regs, i) = g_uprough_snap_regs.a[i];
+   }
+   regs.usp = g_uprough_snap_regs.usp;
+   regs.isp = g_uprough_snap_regs.isp;
+   regs.msp = g_uprough_snap_regs.msp;
+   regs.sr  = (uae_u16)g_uprough_snap_regs.sr;
+   regs.vbr = g_uprough_snap_regs.vbr;
+   MakeFromSR();
+   m68k_setpc(g_uprough_snap_regs.pc);
+   return 1;
+}
+
+int uprough_state_is_saved(void) { return (int)g_uprough_snap_valid; }
+void uprough_state_clear(void)   { g_uprough_snap_valid = 0; }
+
+/* ------------------------------------------------------------------
+ * MMU / cache control regs — read-only snapshot for 020+ targets.
+ * On 68000 these fields are zero. UAE keeps them in regs.{cacr, sfc,
+ * dfc, vbr, caar} + per-MMU state in cpummu / cpummu30 modules.
+ * Returns 8 u32: cacr, sfc, dfc, caar, vbr, urp/srp (030/040 root
+ * ptrs — 0 on non-MMU), tc (030 transaction control), pcr (040+).
+ * ------------------------------------------------------------------ */
+void uprough_get_mmu_regs(uae_u32 *out)
+{
+   if (!out) return;
+   out[0] = regs.cacr;
+   out[1] = regs.sfc;
+   out[2] = regs.dfc;
+   out[3] = regs.caar;
+   out[4] = regs.vbr;
+   /* 030/040 MMU root pointers + transaction control live in
+    * cpummu / cpummu30 — skip for now (would need extern decls and
+    * those modules are 030/040-only). */
+   out[5] = 0;
+   out[6] = 0;
+   out[7] = regs.pcr;
+}
+
 void uprough_trace_clear(void)
 {
    for (uae_u32 i = 0; i < UPROUGH_TRACE_LEN; i++) g_uprough_trace_pcs[i] = 0;
