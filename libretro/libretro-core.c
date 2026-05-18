@@ -8973,6 +8973,32 @@ size_t uprough_cpu_snapshot_size(void)
    return sizeof(g_uprough_cpu_snapshot);
 }
 
+/* FPU FP0..FP7 register read. Each FP reg is 80-bit extended-precision
+ * (floatx80) — u16 exponent+sign, u64 mantissa. We write to caller
+ * buffer as 8 × 3 u32 = 24 u32:
+ *   For each i in 0..7:
+ *     out[i*3 + 0] = exponent (low 16 bits) + sign (bit 15)
+ *     out[i*3 + 1] = mantissa_lo (low 32 bits of u64)
+ *     out[i*3 + 2] = mantissa_hi (high 32 bits of u64)
+ * JS can pack the three into a JS number (limited precision) or
+ * present raw hex.
+ */
+void uprough_get_fpu_regs(uae_u32 *out)
+{
+   if (!out) return;
+#ifdef FPUEMU
+   for (int i = 0; i < 8; i++) {
+      uae_u64 mant = (uae_u64)regs.fp[i].fpx.low;
+      uae_u32 exp  = (uae_u32)regs.fp[i].fpx.high;
+      out[i*3 + 0] = exp;
+      out[i*3 + 1] = (uae_u32)(mant & 0xffffffffull);
+      out[i*3 + 2] = (uae_u32)((mant >> 32) & 0xffffffffull);
+   }
+#else
+   for (int i = 0; i < 24; i++) out[i] = 0;
+#endif
+}
+
 /* ------------------------------------------------------------------
  * PC ring buffer — last UPROUGH_TRACE_LEN program counters in
  * fetch order. Mostly free in the no-halt fast path (one write +
@@ -9409,6 +9435,51 @@ extern uae_s32 uprough_chip_get_copper_hcmp(void);
 
 /* CIA snapshot. Reads 16 u32 from CIAA (num=0) or CIAB (num=1). */
 extern void uprough_cia_get_state(int num, uae_u32 *out);
+
+/* Sprite raw data: ctl, pos, data[0..3] (AGA wide-sprite words),
+ * datb[0..3]. Per-sprite, fills 10 u16 written as 10 u32 for ABI
+ * simplicity. */
+extern uae_u16 uprough_chip_get_sprdata(int sprite, int idx);
+extern uae_u16 uprough_chip_get_sprdatb(int sprite, int idx);
+extern uae_u16 uprough_chip_get_sprctl(int sprite);
+extern uae_u16 uprough_chip_get_sprpos_raw(int sprite);
+
+void uprough_get_sprite_data(int sprite, uae_u32 *out)
+{
+   if (!out) return;
+   out[0] = (uae_u32)uprough_chip_get_sprpos_raw(sprite);
+   out[1] = (uae_u32)uprough_chip_get_sprctl(sprite);
+   for (int i = 0; i < 4; i++) {
+      out[2 + i] = (uae_u32)uprough_chip_get_sprdata(sprite, i);
+      out[6 + i] = (uae_u32)uprough_chip_get_sprdatb(sprite, i);
+   }
+}
+
+/* Audio sample peek: returns N bytes from chipmem at audio_channel[ch]
+ * current playback position. Useful for "what is this channel about
+ * to output". Already covered by reading audio.pt directly; this is
+ * a convenience that does the dereferencing wasm-side. Up to 256
+ * bytes. */
+size_t uprough_audio_peek(int ch, uae_u32 *audio_state_8u32_out, uae_u8 *bytes_out, size_t cap)
+{
+   /* Pull the channel's pt + len_words via the existing audio_get_all */
+   uae_u32 chs[32];
+   uprough_audio_get_all(chs);
+   if (ch < 0 || ch >= 4) return 0;
+   if (audio_state_8u32_out) {
+      for (int i = 0; i < 8; i++) audio_state_8u32_out[i] = chs[ch * 8 + i];
+   }
+   uae_u32 pt   = chs[ch * 8 + 1];
+   uae_u32 wlen = chs[ch * 8 + 3];
+   if (!bytes_out || cap == 0) return 0;
+   size_t avail = (size_t)wlen * 2;  /* word count → bytes */
+   if (avail > cap) avail = cap;
+   if (pt >= chipmem_bank.allocated_size) return 0;
+   size_t room = chipmem_bank.allocated_size - pt;
+   if (avail > room) avail = room;
+   memcpy(bytes_out, chipmem_bank.baseaddr + pt, avail);
+   return avail;
+}
 
 /* Read watchpoints — instrumented in memory.c's chipmem accessors.
  * Halt fires the FIRST cycle a CPU read touches [addr, addr+len).

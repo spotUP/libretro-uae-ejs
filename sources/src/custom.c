@@ -17231,6 +17231,44 @@ uae_s16 uprough_chip_get_sprvstop(int i)
    return (i >= 0 && i < MAX_SPRITES) ? (uae_s16)spr[i].vstop : 0;
 }
 
+/* Sprite DATA / DATB (per-scanline graphics words). For each sprite,
+ * data[0]/datb[0] is the front row word; AGA uses indices 1..3 for
+ * the wider sprite modes (32/64-pixel sprites). Returns up to 8 u16
+ * values per call. */
+uae_u16 uprough_chip_get_sprdata(int sprite, int idx)
+{
+   if (sprite < 0 || sprite >= MAX_SPRITES) return 0;
+#ifdef AGA
+   if (idx < 0 || idx >= 4) return 0;
+#else
+   if (idx != 0) return 0;
+#endif
+   return spr[sprite].data[idx];
+}
+
+uae_u16 uprough_chip_get_sprdatb(int sprite, int idx)
+{
+   if (sprite < 0 || sprite >= MAX_SPRITES) return 0;
+#ifdef AGA
+   if (idx < 0 || idx >= 4) return 0;
+#else
+   if (idx != 0) return 0;
+#endif
+   return spr[sprite].datb[idx];
+}
+
+uae_u16 uprough_chip_get_sprctl(int sprite)
+{
+   if (sprite < 0 || sprite >= MAX_SPRITES) return 0;
+   return spr[sprite].ctl;
+}
+
+uae_u16 uprough_chip_get_sprpos_raw(int sprite)
+{
+   if (sprite < 0 || sprite >= MAX_SPRITES) return 0;
+   return spr[sprite].pos;
+}
+
 /* Palette read. Returns AGA-style 24-bit RGB regardless of mode
  * (ECS colors are 12-bit but UAE's color_reg_get does the conversion).
  * idx: 0..31 ECS / 0..255 AGA. Caller bounds-checks via FMODE. */
