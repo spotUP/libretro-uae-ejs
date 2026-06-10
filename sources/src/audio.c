@@ -2402,7 +2402,12 @@ void update_audio (void)
 	if (!is_audio_active ())
 		goto end;
 
-	n_cycles = (int)get_cycles () - last_cycles;
+	/* Subtract in 64-bit FIRST, then truncate the delta. The old
+	 * `(int)get_cycles () - last_cycles` truncated get_cycles() to i32
+	 * before the subtraction (sign-extending it back against the u64
+	 * last_cycles) — numerically equivalent mod 2^32 but only by
+	 * accident of two's complement; this form states the intent. */
+	n_cycles = (int)(get_cycles () - last_cycles);
 	while (n_cycles > 0) {
 		uae_u32 best_evtime = n_cycles + 1;
 		uae_u32 rounded;

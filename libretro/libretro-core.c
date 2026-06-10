@@ -137,7 +137,7 @@ static char *uae_argv[] = { "puae" };
 static int restart_pending = 0;
 static struct puae_cart_info puae_carts[RETRO_NUM_CORE_OPTION_VALUES_MAX] = {0};
 
-static long retro_now = 0;
+static int64_t retro_now = 0;
 float retro_refresh = 0;
 
 bool retro_message = false;
@@ -275,8 +275,11 @@ static struct {
    int32_t capacity;
 } output_audio_buffer = {NULL, 0, 0};
 
-/* FPS counter + mapper tick */
-long retro_ticks(void)
+/* FPS counter + mapper tick.
+ * int64_t, NOT long: get_time_usec returns int64 microseconds and
+ * `long` is i32 on wasm32, so the old signature truncated — wrapping
+ * read_processor_time() (UAE vsync/hsync timing) every ~35.8 min. */
+int64_t retro_ticks(void)
 {
    if (!perf_cb.get_time_usec)
       return retro_now;

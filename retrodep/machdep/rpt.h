@@ -14,7 +14,7 @@
 #define frame_time_t uae_s64
 #endif
 
-extern long retro_ticks(void);
+extern uae_s64 retro_ticks(void); /* 64-bit: wraps at 35.8 min as `long` on wasm32 */
 
 STATIC_INLINE uae_s64 read_processor_time(void)
 {
