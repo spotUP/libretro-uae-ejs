@@ -6493,3 +6493,36 @@ void uprough_disk_get_state(uae_u32 *out)
    out[6] = (uae_u32)adkcon;
    out[7] = 0;  /* motor state requires reaching `floppy` array; defer */
 }
+
+/* Per-drive floppy head state — the vAmiga-style "which cylinder is the
+ * head on" readout the DMA snapshot can't provide. `floppy`, `side`,
+ * `selected` and `disabled` are file-scope in disk.c, so we can read
+ * them directly here. Layout (out is uae_u32[16]):
+ *   out[0..3]  = current cylinder (0..79) for drive 0..3
+ *   out[4..7]  = motor on (1=spinning) for drive 0..3  (= !motoroff)
+ *   out[8..11] = disk present (1=image inserted) for drive 0..3
+ *   out[12]    = global head side (0/1)
+ *   out[13]    = `selected` drive mask (active-low, raw CIA bits)
+ *   out[14]    = `disabled` drive mask
+ *   out[15]    = MAX_FLOPPY_DRIVES (valid drive count for the JS reader)
+ */
+void uprough_floppy_get_state(uae_u32 *out)
+{
+   int i;
+   if (!out) return;
+   for (i = 0; i < 4; i++) {
+      if (i < MAX_FLOPPY_DRIVES) {
+         out[i]     = (uae_u32)(uae_s32)floppy[i].cyl;
+         out[4 + i] = floppy[i].motoroff ? 0u : 1u;
+         out[8 + i] = floppy[i].diskfile ? 1u : 0u;
+      } else {
+         out[i] = 0u;
+         out[4 + i] = 0u;
+         out[8 + i] = 0u;
+      }
+   }
+   out[12] = (uae_u32)(uae_s32)side;
+   out[13] = (uae_u32)selected;
+   out[14] = (uae_u32)disabled;
+   out[15] = (uae_u32)MAX_FLOPPY_DRIVES;
+}

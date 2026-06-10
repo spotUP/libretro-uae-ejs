@@ -9682,6 +9682,16 @@ void uprough_get_disk(uae_u32 *out)
    uprough_disk_get_state(out);
 }
 
+/* Per-drive floppy head state. 16 u32 — see uprough_floppy_get_state in
+ * disk.c. Gives the current cylinder / side / motor / present per drive
+ * so the maker can show a vAmiga-style track readout. */
+extern void uprough_floppy_get_state(uae_u32 *out);
+
+void uprough_get_floppy(uae_u32 *out)
+{
+   uprough_floppy_get_state(out);
+}
+
 void uprough_get_cia(int num, uae_u32 *out)
 {
    uprough_cia_get_state(num, out);
