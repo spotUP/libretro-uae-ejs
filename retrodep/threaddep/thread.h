@@ -236,13 +236,44 @@ STATIC_INLINE int uae_sem_getvalue (uae_sem_t *sem, int *sval)
 typedef pthread_t uae_thread_id;
 #define BAD_THREAD 0
 
+/* uprough fix (2026-06-10): UAE thread functions are `void f(void *)` but
+ * pthread_create requires `void *(*)(void *)`. The old `(void*)f` cast
+ * worked on desktop ABIs by accident; on wasm32 the pthread entry point is
+ * dispatched through a type-checked call_indirect (dynCall_ii), so a
+ * void-returning entry traps "RuntimeError: function signature mismatch"
+ * and kills the pthread worker. Every uae_start_thread'd thread died on
+ * entry (ide_thread from gayle_reset, trap_thread from extended traps),
+ * crash-looping the whole core in EmulatorJS. Route the spawn through a
+ * correctly-typed trampoline instead. */
+struct uae_thread_startup
+{
+    void (*func)(void *);
+    void *arg;
+};
+
+static void *uae_thread_trampoline (void *p)
+{
+    struct uae_thread_startup s = *(struct uae_thread_startup *)p;
+    free (p);
+    s.func (s.arg);
+    return NULL;
+}
+
 STATIC_INLINE int uae_start_thread (char *name, void (*f)(void *), void *arg, uae_thread_id *foo)
 {
     int result;
     uae_thread_id new_foo;
+    struct uae_thread_startup *s;
     if (!foo)
        foo = &new_foo;
-    result = pthread_create (foo, NULL, (void*)f, arg);
+    s = (struct uae_thread_startup *)malloc (sizeof *s);
+    if (!s)
+       return 0;
+    s->func = f;
+    s->arg = arg;
+    result = pthread_create (foo, NULL, uae_thread_trampoline, s);
+    if (result != 0)
+       free (s);
 
     return 0 == result;
 }
