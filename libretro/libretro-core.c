@@ -8570,6 +8570,16 @@ int uprough_unserialize_status(void) { return g_uprough_unser_status; }
 static volatile uae_u32 g_uprough_unser_then_run = 0;
 void uprough_unserialize_then_run(uae_u32 frames) { g_uprough_unser_then_run = frames; }
 
+/* Frame-number continuity across restores: the UAE savestate does not
+ * carry the libretro vsync_counter, so a restore resets it to ~0 and
+ * the time-travel timeline loses its numbering (rewind/scrubber break
+ * after the first seek). The bridge sets the snapshot's own frame
+ * number here before posting the restore; the deferred block writes
+ * it into vsync_counter on success — post-seek frames continue the
+ * captured timeline exactly. 0xffffffff = leave the counter alone. */
+static volatile uae_u32 g_uprough_unser_set_frame = 0xffffffffu;
+void uprough_unserialize_set_frame(uae_u32 frame) { g_uprough_unser_set_frame = frame; }
+
 /* uprough-debug: deferred keyframe CAPTURE (time-travel). Same pattern
  * as the restore above — processed at the top of retro_run on the core
  * thread, so the snapshot is consistent (between frames) WITHOUT
@@ -8593,12 +8603,13 @@ int     uprough_capture_status(void) { return g_uprough_capture_status; }
 uae_u32 uprough_capture_size(void)   { return g_uprough_capture_size; }
 uae_u32 uprough_capture_frame(void)  { return g_uprough_capture_frame; }
 
-/* uprough-debug: frame-exact run. Arms a countdown decremented once per
- * retro_run; on reaching zero the CPU halt is requested (halt_cause 7 =
- * frame_step). The exact primitive time-travel seek needs — JS-side
- * vsync polling is +-1 frame, this is +-0. Call with the CPU running
- * (un-halt first); cancel with n = 0. */
-static volatile uae_u32 g_uprough_run_frames = 0;
+/* uprough-debug: frame-exact run. Arms a countdown decremented at the
+ * EMULATED-FRAME boundary (custom.c vsync event — per-retro_run
+ * counting overshoots massively when PUAE's audio-clock catch-up runs
+ * many frames inside one retro_run); on reaching zero the CPU halt is
+ * requested (halt_cause 7 = frame_step). Non-static: custom.c
+ * decrements it. Cancel with n = 0. */
+volatile uae_u32 g_uprough_run_frames = 0;
 void uprough_run_frames(uae_u32 n) { g_uprough_run_frames = n; }
 uae_u32 uprough_run_frames_remaining(void) { return g_uprough_run_frames; }
 
@@ -8617,10 +8628,14 @@ void retro_run(void)
          ? retro_unserialize(g_uprough_unser_ptr, (size_t)g_uprough_unser_size)
          : false;
       g_uprough_unser_status = ok ? 0 : -1;
+      if (ok && g_uprough_unser_set_frame != 0xffffffffu) {
+         vsync_counter = g_uprough_unser_set_frame;  /* timeline continuity */
+      }
       if (ok && g_uprough_unser_then_run) {
          g_uprough_run_frames = g_uprough_unser_then_run;  /* frame-exact seek */
       }
       g_uprough_unser_then_run = 0;
+      g_uprough_unser_set_frame = 0xffffffffu;
    }
 
    /* uprough-debug: deferred keyframe capture (time-travel). */
@@ -8636,13 +8651,9 @@ void retro_run(void)
       }
    }
 
-   /* uprough-debug: frame-exact run countdown (time-travel seek). */
-   if (g_uprough_run_frames) {
-      if (--g_uprough_run_frames == 0) {
-         g_uprough_halt_req = 1;
-         g_uprough_halt_cause = 7;  /* frame_step */
-      }
-   }
+   /* (frame-exact run countdown moved BELOW m68k_go — decrementing
+    * after the frame completes makes seek/step land with the target
+    * frame fully rendered and vsync_counter == target.) */
 
    /* Poll inputs */
    input_poll_cb();
@@ -8662,6 +8673,8 @@ void retro_run(void)
    libretro_runloop_active = true;
    restart_pending = m68k_go(1, 1);
    retro_now += 1000000 / retro_refresh;
+   /* (frame-exact run countdown lives in custom.c at the vsync event —
+    * see g_uprough_run_frames above for why not here.) */
 
    /* Handle statusbar text, audio filter type & video geometry + resolution */
    update_audiovideo();

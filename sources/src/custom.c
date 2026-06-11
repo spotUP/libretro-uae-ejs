@@ -703,6 +703,7 @@ static int REGPARAM3 custom_wput_1(int, uaecptr, uae_u32, int) REGPARAM;
  * bottom of this file; dmalog externs come from memory.h). */
 void uprough_cop_check_ip(uae_u32 ip);
 extern volatile uae_u32 g_uprough_cop_bp_count;
+extern volatile uae_u32 g_uprough_run_frames;   /* libretro-core.c */
 
 /*
 * helper functions
@@ -13456,6 +13457,19 @@ static void hsync_handler_pre(bool onvsync)
 #endif
 		vpos = 0;
 		vsync_counter++;
+		/* uprough-debug: frame-exact run countdown (time-travel seek /
+		 * step_frames). Lives HERE, at the emulated-frame boundary, NOT
+		 * per retro_run: PUAE's audio-clock catch-up can run many
+		 * emulated frames inside one retro_run after a long halt, which
+		 * made a per-retro_run countdown overshoot by ~100 frames. The
+		 * CPU poll hook picks up the halt within an instruction of the
+		 * vblank. */
+		if (g_uprough_run_frames) {
+			if (--g_uprough_run_frames == 0) {
+				g_uprough_halt_req = 1;
+				g_uprough_halt_cause = 7;  /* frame_step */
+			}
+		}
 	}
 	check_line_enabled();
 
