@@ -217,16 +217,35 @@ struct autoconfig_info
 extern volatile uae_u32 g_uprough_read_watch_addr;
 extern volatile uae_u32 g_uprough_read_watch_len;
 extern volatile uae_u32 g_uprough_halt_req;
+extern volatile uae_u32 g_uprough_halt_cause;  /* see UPROUGH_HALT_* in libretro-core.c */
 STATIC_INLINE void uprough_read_watch_check(uaecptr addr)
 {
 	uae_u32 len = g_uprough_read_watch_len;
 	if (len != 0) {
 		uae_u32 a = (uae_u32)addr;
 		uae_u32 base = g_uprough_read_watch_addr;
-		if (a >= base && a < base + len)
+		if (a >= base && a < base + len) {
 			g_uprough_halt_req = 1;
+			g_uprough_halt_cause = 3;  /* read watch */
+		}
 	}
 }
+
+/* uprough-debug DMA-attributed write log (state + writer in custom.c —
+ * it needs vpos/hpos/vsync_counter). Call sites guard on the enabled
+ * flag so the disabled cost is one volatile load + branch per write.
+ * The source tag disambiguates writes that funnel through
+ * chipmem_wput_indirect / custom_wput_1: blitter and disk set the tag
+ * around their indirect writes; copper sets it around
+ * custom_wput_copper; untagged means CPU. */
+#define UPROUGH_DMA_SRC_CPU     1
+#define UPROUGH_DMA_SRC_BLITTER 2
+#define UPROUGH_DMA_SRC_DISK    3
+#define UPROUGH_DMA_SRC_COPPER  4
+#define UPROUGH_DMA_SRC_AGNUS   5
+extern volatile uae_u32 g_uprough_dmalog_enabled;
+extern volatile uae_u32 g_uprough_dma_src_tag;
+extern void uprough_dmalog_put(uae_u32 addr, uae_u32 value, int size, int source);
 
 #define MEMORY_LGETI(name) \
 static uae_u32 REGPARAM3 name ## _lgeti (uaecptr) REGPARAM; \

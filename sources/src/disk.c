@@ -4300,11 +4300,13 @@ static int doreaddma(void)
 		if (dsklength > 0) {
 			// fast disk modes, just flush the fifo
 			if (currprefs.floppy_speed > 100 && fifo_inuse[0] && fifo_inuse[1] && fifo_inuse[2]) {
+				g_uprough_dma_src_tag = UPROUGH_DMA_SRC_DISK;  /* uprough-debug DMA log */
 				while (fifo_inuse[0]) {
 					uae_u16 w = DSKDATR(0);
 					chipmem_wput_indirect (dskpt, w);
 					dskpt += 2;
 				}
+				g_uprough_dma_src_tag = 0;
 			}
 			if (disk_fifostatus() > 0) {
 				return -1;
@@ -5078,12 +5080,14 @@ static void DSKLEN_2(uae_u16 v, int hpos)
 				}
 				// read nothing if not supported and MFMSYNC is on.
 				if ((floppysupported) || (!floppysupported && !(adkcon & 0x400))) {
+					g_uprough_dma_src_tag = UPROUGH_DMA_SRC_DISK;  /* uprough-debug DMA log */
 					while (dsklength-- > 0) {
 						chipmem_wput_indirect (dskpt, floppysupported ? drv->bigmfmbuf[pos >> 4] : uaerand());
 						dskpt += 2;
 						pos += 16;
 						pos %= drv->tracklen;
 					}
+					g_uprough_dma_src_tag = 0;
 				} else {
 					pos += uaerand();
 					pos %= drv->tracklen;
@@ -5153,7 +5157,9 @@ static void DSKLEN_2(uae_u16 v, int hpos)
 					}
 #endif
 				} else {
+					g_uprough_dma_src_tag = UPROUGH_DMA_SRC_DISK;  /* uprough-debug DMA log */
 					chipmem_wput_indirect(dskpt, 0);
+					g_uprough_dma_src_tag = 0;
 				}
 				dskpt += 2;
 			}

@@ -9272,6 +9272,12 @@ uae_u32 uprough_get_exception_catch_mask(void)      { return g_uprough_excmask; 
  * the poll hook here — must be linkable across translation units. */
 volatile uae_u32 g_uprough_halt_req = 0;
 static volatile uae_u32 g_uprough_halted   = 0;
+/* Why the machine last halted — written together with every halt_req
+ * set. 0 = manual/none, 1 = PC breakpoint, 2 = write watch, 3 = read
+ * watch (memory.h), 4 = beamtrap, 5 = copper breakpoint (custom.c),
+ * 6 = exception catchpoint. */
+volatile uae_u32 g_uprough_halt_cause = 0;
+int uprough_halt_cause(void) { return (int)g_uprough_halt_cause; }
 static volatile uae_u32 g_uprough_step_req = 0;
 static volatile uae_u32 g_uprough_bp_pcs[UPROUGH_MAX_BP];
 static volatile uae_u32 g_uprough_bp_count = 0;
@@ -9335,6 +9341,7 @@ void uprough_cpu_poll_hook(void)
    if (g_uprough_excmask != 0 && regs.exception != 0) {
       if (regs.exception < 32 && (g_uprough_excmask & (1u << regs.exception))) {
          g_uprough_halt_req = 1;
+         g_uprough_halt_cause = 6;  /* exception catchpoint */
       }
    }
 
@@ -9343,6 +9350,7 @@ void uprough_cpu_poll_hook(void)
       for (uae_u32 i = 0; i < g_uprough_bp_count; i++) {
          if (g_uprough_bp_pcs[i] == pc) {
             g_uprough_halt_req = 1;
+            g_uprough_halt_cause = 1;  /* PC breakpoint */
             break;
          }
       }
@@ -9361,6 +9369,7 @@ void uprough_cpu_poll_hook(void)
               (g_uprough_beamtrap_h < 0 ||
                current_hpos() >= g_uprough_beamtrap_h))) {
             g_uprough_halt_req = 1;
+            g_uprough_halt_cause = 4;  /* beamtrap */
             g_uprough_beamtrap_fired = 1;
             g_uprough_beamtrap_state = g_uprough_beamtrap_persist ? 1 : 0;
          }
@@ -9372,6 +9381,7 @@ void uprough_cpu_poll_hook(void)
     * cost in the no-watch case is one volatile load + branch. */
    if (uprough_watch_check()) {
       g_uprough_halt_req = 1;
+      g_uprough_halt_cause = 2;  /* write watch */
    }
 
    if (!g_uprough_halt_req) {
@@ -9417,7 +9427,7 @@ void uprough_cpu_poll_hook(void)
 }
 
 /* JS-facing controls. */
-void uprough_set_halt(int v)         { g_uprough_halt_req = v ? 1u : 0u; }
+void uprough_set_halt(int v)         { g_uprough_halt_req = v ? 1u : 0u; g_uprough_halt_cause = 0; }
 int  uprough_get_halted(void)        { return (int)g_uprough_halted; }
 int  uprough_get_halt_req(void)      { return (int)g_uprough_halt_req; }
 

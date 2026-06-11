@@ -496,7 +496,11 @@ static void blit_chipmem_agnus_wput(uaecptr addr, uae_u32 w, uae_u32 typemask)
 #ifdef DEBUGGER
 		debug_putpeekdma_chipram(addr, w, typemask, 0x000, 0x054);
 #endif
+		/* uprough-debug: attribute this chip write to the blitter in
+		 * the DMA write log (the indirect accessor logs the tag). */
+		g_uprough_dma_src_tag = UPROUGH_DMA_SRC_BLITTER;
 		chipmem_wput_indirect(addr, w);
+		g_uprough_dma_src_tag = 0;
 		regs.chipset_latch_rw = w;
 	}
 }

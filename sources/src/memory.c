@@ -764,10 +764,20 @@ static uae_u32 REGPARAM2 chipmem_bget (uaecptr addr)
 	return v;
 }
 
+/* uprough-debug: chip writes log their source — chipmem_wput_indirect
+ * may resolve to either the plain or the agnus accessors, so blitter/
+ * disk set g_uprough_dma_src_tag around their indirect writes and the
+ * accessors fall back to CPU (plain) / AGNUS (agnus) when untagged. */
+#define UPROUGH_DMALOG_CHIP(addr, val, sz, fallback) \
+	do { if (g_uprough_dmalog_enabled) \
+		uprough_dmalog_put((uae_u32)(addr), (uae_u32)(val), (sz), \
+			g_uprough_dma_src_tag ? (int)g_uprough_dma_src_tag : (fallback)); } while (0)
+
 void REGPARAM2 chipmem_lput (uaecptr addr, uae_u32 l)
 {
 	uae_u32 *m;
 
+	UPROUGH_DMALOG_CHIP(addr, l >> 16, 4, UPROUGH_DMA_SRC_CPU);
 	addr &= chipmem_bank.mask;
 	m = (uae_u32 *)(chipmem_bank.baseaddr + addr);
 	do_put_mem_long (m, l);
@@ -777,6 +787,7 @@ void REGPARAM2 chipmem_wput (uaecptr addr, uae_u32 w)
 {
 	uae_u16 *m;
 
+	UPROUGH_DMALOG_CHIP(addr, w, 2, UPROUGH_DMA_SRC_CPU);
 	addr &= chipmem_bank.mask;
 	m = (uae_u16 *)(chipmem_bank.baseaddr + addr);
 	do_put_mem_word (m, w);
@@ -784,6 +795,7 @@ void REGPARAM2 chipmem_wput (uaecptr addr, uae_u32 w)
 
 void REGPARAM2 chipmem_bput (uaecptr addr, uae_u32 b)
 {
+	UPROUGH_DMALOG_CHIP(addr, b, 1, UPROUGH_DMA_SRC_CPU);
 	addr &= chipmem_bank.mask;
 	chipmem_bank.baseaddr[addr] = b;
 }
@@ -852,6 +864,7 @@ static void REGPARAM2 chipmem_agnus_lput (uaecptr addr, uae_u32 l)
 {
 	uae_u32 *m;
 
+	UPROUGH_DMALOG_CHIP(addr, l >> 16, 4, UPROUGH_DMA_SRC_AGNUS);
 	addr &= chipmem_full_mask;
 	if (addr >= chipmem_full_size - 3)
 		return;
@@ -863,6 +876,7 @@ void REGPARAM2 chipmem_agnus_wput (uaecptr addr, uae_u32 w)
 {
 	uae_u16 *m;
 
+	UPROUGH_DMALOG_CHIP(addr, w, 2, UPROUGH_DMA_SRC_AGNUS);
 	addr &= chipmem_full_mask;
 	if (addr >= chipmem_full_size - 1)
 		return;
@@ -872,6 +886,7 @@ void REGPARAM2 chipmem_agnus_wput (uaecptr addr, uae_u32 w)
 
 static void REGPARAM2 chipmem_agnus_bput (uaecptr addr, uae_u32 b)
 {
+	UPROUGH_DMALOG_CHIP(addr, b, 1, UPROUGH_DMA_SRC_AGNUS);
 	addr &= chipmem_full_mask;
 	if (addr >= chipmem_full_size)
 		return;

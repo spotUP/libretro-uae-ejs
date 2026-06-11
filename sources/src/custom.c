@@ -699,6 +699,11 @@ static int toscr_nbits;
 
 static int REGPARAM3 custom_wput_1(int, uaecptr, uae_u32, int) REGPARAM;
 
+/* uprough-debug fwd decls (definitions near the chip accessors at the
+ * bottom of this file; dmalog externs come from memory.h). */
+void uprough_cop_check_ip(uae_u32 ip);
+extern volatile uae_u32 g_uprough_cop_bp_count;
+
 /*
 * helper functions
 */
@@ -8722,6 +8727,9 @@ static void immediate_copper(int num)
 			break;
 		pos++;
 		oldpos = pos;
+		/* uprough-debug: copper-IP breakpoint (immediate-copper path). */
+		if (g_uprough_cop_bp_count)
+			uprough_cop_check_ip((uae_u32)cop_state.ip);
 		cop_state.ir[0] = chipmem_wget_indirect (cop_state.ip);
 		cop_state.ir[1] = chipmem_wget_indirect (cop_state.ip + 2);
 		cop_state.ip += 4;
@@ -11013,6 +11021,10 @@ static void do_copper_fetch(int hpos, uae_u16 id)
 		alloc_cycle(hpos, CYCLE_COPPER);
 		return;
 	}
+
+	/* uprough-debug: copper-IP breakpoint (no-op when none armed). */
+	if (g_uprough_cop_bp_count)
+		uprough_cop_check_ip((uae_u32)cop_state.ip);
 
 	switch (cop_state.state)
 	{
@@ -15458,6 +15470,14 @@ static int REGPARAM2 custom_wput_1 (int hpos, uaecptr addr, uae_u32 value, int n
 	uaecptr oaddr = addr;
 	addr &= 0x1FE;
 	value &= 0xffff;
+	/* uprough-debug: log every custom-register write with its source —
+	 * answers "who wrote COLOR00 at vpos N". copper_access is the
+	 * existing UAE flag; the tag covers blitter/disk funnels; untagged
+	 * is the CPU. */
+	if (g_uprough_dmalog_enabled)
+		uprough_dmalog_put(0xdff000u | (uae_u32)addr, value, 2,
+			copper_access ? UPROUGH_DMA_SRC_COPPER :
+			(g_uprough_dma_src_tag ? (int)g_uprough_dma_src_tag : UPROUGH_DMA_SRC_CPU));
 	custom_storage[addr >> 1].value = (uae_u16)value;
 	custom_storage[addr >> 1].pc = copper_access ? cop_state.ip | 1 : M68K_GETPC;
 #ifdef ACTION_REPLAY
@@ -17208,6 +17228,85 @@ uae_u32 uprough_chip_get_sprpt(int i)
 {
    return (i >= 0 && i < MAX_SPRITES) ? (uae_u32)spr[i].pt : 0;
 }
+
+/* uprough-debug: copper-IP breakpoints. Checked at every copper
+ * instruction fetch (do_copper_fetch + immediate_copper); on match the
+ * CPU halt request is raised — the whole machine (copper included)
+ * freezes at the next CPU instruction boundary, with cop_state.ip
+ * still at the matched fetch. */
+volatile uae_u32 g_uprough_cop_bp[8];
+volatile uae_u32 g_uprough_cop_bp_count = 0;
+
+void uprough_cop_check_ip(uae_u32 ip)
+{
+   uae_u32 n = g_uprough_cop_bp_count;
+   for (uae_u32 i = 0; i < n; i++) {
+      if (g_uprough_cop_bp[i] == ip) {
+         g_uprough_halt_req = 1;
+         g_uprough_halt_cause = 5;  /* copper breakpoint */
+         break;
+      }
+   }
+}
+
+int uprough_cop_set_breakpoint(uae_u32 addr)
+{
+   uae_u32 n = g_uprough_cop_bp_count;
+   for (uae_u32 i = 0; i < n; i++) {
+      if (g_uprough_cop_bp[i] == addr) return (int)i;
+   }
+   if (n >= 8) return -1;
+   g_uprough_cop_bp[n] = addr;
+   g_uprough_cop_bp_count = n + 1;
+   return (int)n;
+}
+
+void uprough_cop_clear_breakpoints(void) { g_uprough_cop_bp_count = 0; }
+int  uprough_cop_bp_count(void)          { return (int)g_uprough_cop_bp_count; }
+
+/* uprough-debug: DMA-attributed write-history ring. Entry = 4 u32:
+ *   [0] addr  (chip address, or $DFF000|reg for custom-reg writes)
+ *   [1] (value & 0xffff) << 16 | size << 8 | source (UPROUGH_DMA_SRC_*)
+ *   [2] vpos << 16 | hpos
+ *   [3] frame (vsync_counter)
+ * 16 K entries = 256 KB BSS. Default off; optional address filter.
+ * Call sites guard on g_uprough_dmalog_enabled (one load + branch when
+ * off), so the body here only pays when logging is armed. */
+#define UPROUGH_DMALOG_CAP 16384
+volatile uae_u32 g_uprough_dmalog_enabled = 0;
+volatile uae_u32 g_uprough_dma_src_tag = 0;
+static volatile uae_u32 g_uprough_dmalog_filter_addr = 0;
+static volatile uae_u32 g_uprough_dmalog_filter_len = 0;   /* 0 = log everything */
+static volatile uae_u32 g_uprough_dmalog_head = 0;
+static uae_u32 g_uprough_dmalog_ring[UPROUGH_DMALOG_CAP * 4];
+
+void uprough_dmalog_put(uae_u32 addr, uae_u32 value, int size, int source)
+{
+   uae_u32 flen = g_uprough_dmalog_filter_len;
+   if (flen != 0) {
+      uae_u32 fbase = g_uprough_dmalog_filter_addr;
+      if (addr + (uae_u32)size <= fbase || addr >= fbase + flen) return;
+   }
+   uae_u32 h = g_uprough_dmalog_head & (UPROUGH_DMALOG_CAP - 1);
+   uae_u32 *e = &g_uprough_dmalog_ring[h * 4];
+   e[0] = addr;
+   e[1] = ((value & 0xffff) << 16) | (((uae_u32)size & 0xff) << 8) | ((uae_u32)source & 0xff);
+   e[2] = (((uae_u32)vpos & 0xffff) << 16) | ((uae_u32)current_hpos() & 0xffff);
+   e[3] = vsync_counter;
+   g_uprough_dmalog_head = g_uprough_dmalog_head + 1;
+}
+
+void  uprough_dmalog_set_enabled(int v)  { g_uprough_dmalog_enabled = v ? 1u : 0u; }
+int   uprough_dmalog_get_enabled(void)   { return (int)g_uprough_dmalog_enabled; }
+void  uprough_dmalog_set_filter(uae_u32 addr, uae_u32 len)
+{
+   g_uprough_dmalog_filter_addr = addr;
+   g_uprough_dmalog_filter_len  = len;
+}
+void  uprough_dmalog_clear(void)         { g_uprough_dmalog_head = 0; }
+void *uprough_dmalog_get_ptr(void)       { return g_uprough_dmalog_ring; }
+uae_u32 uprough_dmalog_get_head(void)    { return g_uprough_dmalog_head; }
+uae_u32 uprough_dmalog_get_capacity(void){ return UPROUGH_DMALOG_CAP; }
 
 /* Copper live state. cop_state.ip is the current copper PC; ir[0/1]
  * are the two words of the current instruction. */
