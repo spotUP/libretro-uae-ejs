@@ -17280,6 +17280,18 @@ static volatile uae_u32 g_uprough_dmalog_filter_len = 0;   /* 0 = log everything
 static volatile uae_u32 g_uprough_dmalog_head = 0;
 static uae_u32 g_uprough_dmalog_ring[UPROUGH_DMALOG_CAP * 4];
 
+/* Beam position for hooks that run at MILLIONS of calls per second
+ * and from arbitrary contexts: current_hpos() calls gui_message()
+ * when the value is transiently out of range — a blocking alert that
+ * WEDGES the wasm worker (found the hard way: an unfiltered dmalog
+ * froze the emulator within a minute). Use the raw safe variant and
+ * clamp silently. */
+int uprough_hpos(void)
+{
+   int hp = current_hpos_safe();
+   return (hp < 0 || hp > 511) ? 0 : hp;
+}
+
 void uprough_dmalog_put(uae_u32 addr, uae_u32 value, int size, int source)
 {
    uae_u32 flen = g_uprough_dmalog_filter_len;
@@ -17291,7 +17303,7 @@ void uprough_dmalog_put(uae_u32 addr, uae_u32 value, int size, int source)
    uae_u32 *e = &g_uprough_dmalog_ring[h * 4];
    e[0] = addr;
    e[1] = ((value & 0xffff) << 16) | (((uae_u32)size & 0xff) << 8) | ((uae_u32)source & 0xff);
-   e[2] = (((uae_u32)vpos & 0xffff) << 16) | ((uae_u32)current_hpos() & 0xffff);
+   e[2] = (((uae_u32)vpos & 0xffff) << 16) | ((uae_u32)uprough_hpos() & 0xffff);
    e[3] = vsync_counter;
    g_uprough_dmalog_head = g_uprough_dmalog_head + 1;
 }

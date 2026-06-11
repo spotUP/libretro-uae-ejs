@@ -9298,7 +9298,10 @@ extern volatile uae_u32 g_uprough_step_n_remaining;  /* fwd, defined below */
  *   state 0 = off, 1 = waiting for beam to wrap above target,
  *   2 = armed (beam is above target, fire when it reaches it). */
 extern int vpos;                /* custom.c (also extern'd below) */
-extern int current_hpos(void);
+extern int uprough_hpos(void);  /* clamped current_hpos_safe — current_hpos()
+                                 * pops a blocking gui_message on transient
+                                 * out-of-range values and wedges the worker
+                                 * when called per-instruction */
 static volatile int      g_uprough_beamtrap_v = -1;
 static volatile int      g_uprough_beamtrap_h = -1;
 static volatile uae_u32  g_uprough_beamtrap_state = 0;
@@ -9367,7 +9370,7 @@ void uprough_cpu_poll_hook(void)
          if (v > g_uprough_beamtrap_v ||
              (v == g_uprough_beamtrap_v &&
               (g_uprough_beamtrap_h < 0 ||
-               current_hpos() >= g_uprough_beamtrap_h))) {
+               uprough_hpos() >= g_uprough_beamtrap_h))) {
             g_uprough_halt_req = 1;
             g_uprough_halt_cause = 4;  /* beamtrap */
             g_uprough_beamtrap_fired = 1;
