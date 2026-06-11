@@ -9761,12 +9761,33 @@ size_t uprough_chipset_snapshot_size(void)
  * hooks (intentional — debugger pokes should not trigger custom-reg
  * side effects). Bounds-checked against chipmem_bank.allocated_size.
  * ------------------------------------------------------------------ */
+/* Full-address read/write via UAE's memory-bank table (valid_address +
+ * get_real_address), so the maker's bridge can reach SLOW/bogo RAM
+ * ($C00000+) and fast RAM — not just chip RAM. The A500 trackmo runs its
+ * kernel + per-part DemoMailbox in slow RAM (the dynamic chip pool puts
+ * them there on a no-fast A500), so the old chipmem-only path could never
+ * see the mailbox: resolveMboxPtr would scan chip RAM only, miss it (or
+ * worse, match a chip code-immediate "LVPT" and let a playhead poke
+ * corrupt chip RAM). get_real_address returns the host pointer for the
+ * bank that owns addr (chip/bogo/fast/ROM); valid_address bounds-checks
+ * the whole [addr, addr+n) range against that bank first. */
 size_t uprough_write_memory(uae_u32 addr, const void *src, size_t n)
 {
-   if (addr >= chipmem_bank.allocated_size) return 0;
-   size_t avail = (size_t)chipmem_bank.allocated_size - (size_t)addr;
-   if (n > avail) n = avail;
-   memcpy(chipmem_bank.baseaddr + addr, src, n);
+   if (n == 0) return 0;
+   if (!valid_address(addr, n)) return 0;
+   uae_u8 *dst = get_real_address(addr);
+   if (!dst) return 0;
+   memcpy(dst, src, n);
+   return n;
+}
+
+size_t uprough_read_memory(uae_u32 addr, void *dst, size_t n)
+{
+   if (n == 0) return 0;
+   if (!valid_address(addr, n)) return 0;
+   uae_u8 *src = get_real_address(addr);
+   if (!src) return 0;
+   memcpy(dst, src, n);
    return n;
 }
 
