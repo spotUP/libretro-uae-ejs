@@ -214,19 +214,26 @@ struct autoconfig_info
  * BEFORE `addr -= startaccessmask` so the full 68k address is
  * compared (same convention as the chipmem getters). Cost when
  * disarmed: one volatile load + branch. */
-extern volatile uae_u32 g_uprough_read_watch_addr;
-extern volatile uae_u32 g_uprough_read_watch_len;
+#define UPROUGH_READ_WATCH_SLOTS 8
+extern volatile uae_u32 g_uprough_read_watch_count;  /* armed-slot gate */
+extern volatile uae_u32 g_uprough_read_watch_addr[UPROUGH_READ_WATCH_SLOTS];
+extern volatile uae_u32 g_uprough_read_watch_len[UPROUGH_READ_WATCH_SLOTS];
 extern volatile uae_u32 g_uprough_halt_req;
-extern volatile uae_u32 g_uprough_halt_cause;  /* see UPROUGH_HALT_* in libretro-core.c */
+extern volatile uae_u32 g_uprough_halt_cause;   /* see UPROUGH_HALT_* in libretro-core.c */
+extern volatile uae_u32 g_uprough_halt_detail;  /* slot index of the trap that fired */
 STATIC_INLINE void uprough_read_watch_check(uaecptr addr)
 {
-	uae_u32 len = g_uprough_read_watch_len;
-	if (len != 0) {
+	if (g_uprough_read_watch_count != 0) {
 		uae_u32 a = (uae_u32)addr;
-		uae_u32 base = g_uprough_read_watch_addr;
-		if (a >= base && a < base + len) {
-			g_uprough_halt_req = 1;
-			g_uprough_halt_cause = 3;  /* read watch */
+		for (int i = 0; i < UPROUGH_READ_WATCH_SLOTS; i++) {
+			uae_u32 len = g_uprough_read_watch_len[i];
+			if (len != 0 && a >= g_uprough_read_watch_addr[i]
+			    && a < g_uprough_read_watch_addr[i] + len) {
+				g_uprough_halt_req = 1;
+				g_uprough_halt_cause = 3;  /* read watch */
+				g_uprough_halt_detail = (uae_u32)i;
+				break;
+			}
 		}
 	}
 }

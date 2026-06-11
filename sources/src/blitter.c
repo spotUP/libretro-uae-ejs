@@ -458,8 +458,76 @@ static void blitter_end(void)
 	blt_info.blitter_dangerous_bpl = 0;
 }
 
+/* uprough-debug: blit operation log + break-on-blit-range (phase 2).
+ * One entry per blit start, 12 u32 each:
+ *   [0] bltcon0<<16 | bltcon1        [1..4] apt bpt cpt dpt
+ *   [5] hblitsize<<16 | vblitsize    [6] amod<<16 | bmod (u16 raw)
+ *   [7] cmod<<16 | dmod (u16 raw)    [8] vpos<<16 | hpos
+ *   [9] frame (vsync_counter)        [10] flags: 1 line, 2 fill, 4 desc
+ *   [11] done stamp: done_frame<<16 | done_vpos; 0xffffffff = running
+ * 4096 entries = 192 KB BSS. Default off (one load+branch per blit).
+ * blitter_done_all stamps the most recent entry — blits are serial on
+ * Amiga so head-1 is always the right one. */
+#define UPROUGH_BLITLOG_CAP 4096
+extern int uprough_hpos(void);
+volatile uae_u32 g_uprough_blitlog_enabled = 0;
+static volatile uae_u32 g_uprough_blitlog_head = 0;
+static uae_u32 g_uprough_blitlog_ring[UPROUGH_BLITLOG_CAP * 12];
+static volatile uae_u32 g_uprough_blit_break_addr = 0;
+static volatile uae_u32 g_uprough_blit_break_len = 0;
+
+void  uprough_blitlog_set_enabled(int v)   { g_uprough_blitlog_enabled = v ? 1u : 0u; }
+int   uprough_blitlog_get_enabled(void)    { return (int)g_uprough_blitlog_enabled; }
+void  uprough_blitlog_clear(void)          { g_uprough_blitlog_head = 0; }
+void *uprough_blitlog_get_ptr(void)        { return g_uprough_blitlog_ring; }
+uae_u32 uprough_blitlog_get_head(void)     { return g_uprough_blitlog_head; }
+uae_u32 uprough_blitlog_get_capacity(void) { return UPROUGH_BLITLOG_CAP; }
+void  uprough_blit_break_range(uae_u32 addr, uae_u32 len)
+{
+	g_uprough_blit_break_addr = addr;
+	g_uprough_blit_break_len  = len;
+}
+
+static void uprough_blitlog_start(void)
+{
+	uae_u32 h = g_uprough_blitlog_head & (UPROUGH_BLITLOG_CAP - 1);
+	uae_u32 *e = &g_uprough_blitlog_ring[h * 12];
+	e[0]  = ((uae_u32)bltcon0 << 16) | bltcon1;
+	e[1]  = bltapt;  e[2] = bltbpt;  e[3] = bltcpt;  e[4] = bltdpt;
+	e[5]  = ((uae_u32)(blt_info.hblitsize & 0xffff) << 16) | (blt_info.vblitsize & 0xffff);
+	e[6]  = ((uae_u32)(blt_info.bltamod & 0xffff) << 16) | (blt_info.bltbmod & 0xffff);
+	e[7]  = ((uae_u32)(blt_info.bltcmod & 0xffff) << 16) | (blt_info.bltdmod & 0xffff);
+	e[8]  = (((uae_u32)vpos & 0xffff) << 16) | ((uae_u32)uprough_hpos() & 0xffff);
+	e[9]  = vsync_counter;
+	e[10] = (blitline ? 1u : 0u) | (blitfill ? 2u : 0u) | (blitdesc ? 4u : 0u);
+	e[11] = 0xffffffffu;
+	g_uprough_blitlog_head = g_uprough_blitlog_head + 1;
+
+	/* break-on-blit: halt when the D channel is enabled and its
+	 * (conservative) output region intersects the armed range. */
+	uae_u32 blen = g_uprough_blit_break_len;
+	if (blen != 0 && (bltcon0 & 0x100)) {                  /* DDEN */
+		uae_s32 dmod = (uae_s16)blt_info.bltdmod;
+		uae_u32 row = (uae_u32)blt_info.hblitsize * 2;
+		uae_s32 span = (uae_s32)blt_info.vblitsize * ((uae_s32)row + (dmod < 0 ? -dmod : dmod));
+		uae_u32 lo = blitdesc ? (bltdpt > (uae_u32)span ? bltdpt - span : 0) : bltdpt;
+		uae_u32 hi = blitdesc ? bltdpt + row : bltdpt + span;
+		uae_u32 base = g_uprough_blit_break_addr;
+		if (lo < base + blen && hi > base) {
+			g_uprough_halt_req = 1;
+			g_uprough_halt_cause = 8;  /* blit_break */
+		}
+	}
+}
+
 static void blitter_done_all(int hpos)
 {
+	/* uprough-debug: stamp completion on the latest log entry. */
+	if (g_uprough_blitlog_enabled && g_uprough_blitlog_head != 0) {
+		uae_u32 h = (g_uprough_blitlog_head - 1) & (UPROUGH_BLITLOG_CAP - 1);
+		g_uprough_blitlog_ring[h * 12 + 11] =
+			((vsync_counter & 0xffff) << 16) | ((uae_u32)vpos & 0xffff);
+	}
 	blt_info.blit_main = 0;
 	blt_info.blit_finald = 0;
 	if (m68k_interrupt_delay && hpos >= 0) {
@@ -2015,6 +2083,10 @@ void do_blitter(int hpos, int copper, uaecptr pc)
 	blt_info.blit_pending = 1;
 
 	blitter_start_init();
+
+	/* uprough-debug: blit log + break-on-range (no-op when disabled). */
+	if (g_uprough_blitlog_enabled || g_uprough_blit_break_len)
+		uprough_blitlog_start();
 
 	if (blitline) {
 		cycles = blt_info.vblitsize * blt_info.hblitsize;

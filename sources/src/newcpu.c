@@ -3466,12 +3466,40 @@ kludge_me_do:
 	exception_check_trace (nr);
 }
 
+/* uprough-debug: interrupt/exception log ring (phase 2). One entry per
+ * 68k exception/interrupt taken, 4 u32: [0] vector, [1] PC at the
+ * exception, [2] vpos<<16|hpos, [3] frame. 8192 entries = 128 KB BSS.
+ * Default off (one load+branch per exception). Answers "which IRQs ran
+ * this frame / what storms" and gives per-frame VBL handler timing. */
+#define UPROUGH_IRQLOG_CAP 8192
+extern int uprough_hpos(void);
+volatile uae_u32 g_uprough_irqlog_enabled = 0;
+static volatile uae_u32 g_uprough_irqlog_head = 0;
+static uae_u32 g_uprough_irqlog_ring[UPROUGH_IRQLOG_CAP * 4];
+
+void  uprough_irqlog_set_enabled(int v)   { g_uprough_irqlog_enabled = v ? 1u : 0u; }
+int   uprough_irqlog_get_enabled(void)    { return (int)g_uprough_irqlog_enabled; }
+void  uprough_irqlog_clear(void)          { g_uprough_irqlog_head = 0; }
+void *uprough_irqlog_get_ptr(void)        { return g_uprough_irqlog_ring; }
+uae_u32 uprough_irqlog_get_head(void)     { return g_uprough_irqlog_head; }
+uae_u32 uprough_irqlog_get_capacity(void) { return UPROUGH_IRQLOG_CAP; }
+
 // address = format $2 stack frame address field
 static void ExceptionX (int nr, uaecptr address, uaecptr oldpc)
 {
 	uaecptr pc = m68k_getpc();
 	regs.exception = nr;
 	regs.loop_mode = 0;
+
+	if (g_uprough_irqlog_enabled) {
+		uae_u32 h = g_uprough_irqlog_head & (UPROUGH_IRQLOG_CAP - 1);
+		uae_u32 *e = &g_uprough_irqlog_ring[h * 4];
+		e[0] = (uae_u32)nr;
+		e[1] = (uae_u32)pc;
+		e[2] = (((uae_u32)vpos & 0xffff) << 16) | ((uae_u32)uprough_hpos() & 0xffff);
+		e[3] = vsync_counter;
+		g_uprough_irqlog_head = g_uprough_irqlog_head + 1;
+	}
 
 #ifdef DEBUGGER
 	if (debug_dma) {

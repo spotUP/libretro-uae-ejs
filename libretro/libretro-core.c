@@ -8562,6 +8562,46 @@ void uprough_request_unserialize(const void *p, uae_u32 n)
 }
 int uprough_unserialize_status(void) { return g_uprough_unser_status; }
 
+/* Time-travel seek atomicity: when set (frames > 0) BEFORE posting a
+ * restore request, the deferred-restore block transfers this value to
+ * the frame-exact run countdown in the SAME retro_run that completed
+ * the restore — so exactly `frames` frames execute after the snapshot
+ * lands, with zero JS-polling drift. */
+static volatile uae_u32 g_uprough_unser_then_run = 0;
+void uprough_unserialize_then_run(uae_u32 frames) { g_uprough_unser_then_run = frames; }
+
+/* uprough-debug: deferred keyframe CAPTURE (time-travel). Same pattern
+ * as the restore above — processed at the top of retro_run on the core
+ * thread, so the snapshot is consistent (between frames) WITHOUT
+ * halting the machine. The bridge mallocs a staging buffer once,
+ * posts a capture request, polls status, copies the bytes out to its
+ * JS-side keyframe ring, and re-arms for the next interval. */
+static void          *g_uprough_capture_ptr = NULL;
+static volatile uae_u32 g_uprough_capture_cap = 0;
+static volatile uae_u32 g_uprough_capture_size = 0;   /* bytes written */
+static volatile int   g_uprough_capture_status = 0;   /* 0 idle/ok, 1 pending, -1 failed */
+static volatile uae_u32 g_uprough_capture_frame = 0;  /* vsync_counter at capture */
+
+void uprough_capture_request(void *p, uae_u32 cap)
+{
+   g_uprough_capture_ptr  = p;
+   g_uprough_capture_cap  = cap;
+   g_uprough_capture_size = 0;
+   g_uprough_capture_status = 1;
+}
+int     uprough_capture_status(void) { return g_uprough_capture_status; }
+uae_u32 uprough_capture_size(void)   { return g_uprough_capture_size; }
+uae_u32 uprough_capture_frame(void)  { return g_uprough_capture_frame; }
+
+/* uprough-debug: frame-exact run. Arms a countdown decremented once per
+ * retro_run; on reaching zero the CPU halt is requested (halt_cause 7 =
+ * frame_step). The exact primitive time-travel seek needs — JS-side
+ * vsync polling is +-1 frame, this is +-0. Call with the CPU running
+ * (un-halt first); cancel with n = 0. */
+static volatile uae_u32 g_uprough_run_frames = 0;
+void uprough_run_frames(uae_u32 n) { g_uprough_run_frames = n; }
+uae_u32 uprough_run_frames_remaining(void) { return g_uprough_run_frames; }
+
 void retro_run(void)
 {
    static uint8_t old_frame = 0;
@@ -8577,6 +8617,31 @@ void retro_run(void)
          ? retro_unserialize(g_uprough_unser_ptr, (size_t)g_uprough_unser_size)
          : false;
       g_uprough_unser_status = ok ? 0 : -1;
+      if (ok && g_uprough_unser_then_run) {
+         g_uprough_run_frames = g_uprough_unser_then_run;  /* frame-exact seek */
+      }
+      g_uprough_unser_then_run = 0;
+   }
+
+   /* uprough-debug: deferred keyframe capture (time-travel). */
+   if (g_uprough_capture_status == 1) {
+      size_t need = retro_serialize_size();
+      if (g_uprough_capture_ptr && need > 0 && need <= g_uprough_capture_cap
+          && retro_serialize(g_uprough_capture_ptr, need)) {
+         g_uprough_capture_size  = (uae_u32)need;
+         g_uprough_capture_frame = vsync_counter;
+         g_uprough_capture_status = 0;
+      } else {
+         g_uprough_capture_status = -1;
+      }
+   }
+
+   /* uprough-debug: frame-exact run countdown (time-travel seek). */
+   if (g_uprough_run_frames) {
+      if (--g_uprough_run_frames == 0) {
+         g_uprough_halt_req = 1;
+         g_uprough_halt_cause = 7;  /* frame_step */
+      }
    }
 
    /* Poll inputs */
@@ -9051,7 +9116,9 @@ void uprough_get_fpu_regs(uae_u32 *out)
  *
  * Power-of-two so the index wrap is a single AND. 256 slots ≈ 1 KB.
  * ------------------------------------------------------------------ */
-#define UPROUGH_TRACE_LEN 256
+/* 65536 since phase 2 (was 256): big enough for a whole-frame+ window,
+ * which is what the sampling profiler aggregates. 256 KB BSS. */
+#define UPROUGH_TRACE_LEN 65536
 #define UPROUGH_TRACE_MASK (UPROUGH_TRACE_LEN - 1)
 static volatile uae_u32 g_uprough_trace_pcs[UPROUGH_TRACE_LEN];
 static volatile uae_u32 g_uprough_trace_head = 0;   /* next slot to write */
@@ -9071,7 +9138,9 @@ int  uprough_trace_get_enabled(void)  { return (int)g_uprough_trace_enabled; }
  *   [16]     SR (raw, not recomposed)
  *   [17]     PC
  */
-#define UPROUGH_REGS_RING_LEN 32
+/* 1024 since phase 2 (was 32) — ~72 KB BSS; deep enough to walk back
+ * through a whole interrupt handler or copperlist-build routine. */
+#define UPROUGH_REGS_RING_LEN 1024
 #define UPROUGH_REGS_RING_MASK (UPROUGH_REGS_RING_LEN - 1)
 #define UPROUGH_REGS_SLOT_U32 18
 static volatile uae_u32 g_uprough_regs_ring[UPROUGH_REGS_RING_LEN * UPROUGH_REGS_SLOT_U32];
@@ -9559,48 +9628,90 @@ int uprough_set_reg(unsigned idx, uae_u32 value)
  * branch-free.
  * ------------------------------------------------------------------ */
 #define UPROUGH_WATCH_MAX 4096
+#define UPROUGH_WATCH_SLOTS 8
 
-static volatile uae_u32 g_uprough_watch_addr = 0;
-static volatile uae_u32 g_uprough_watch_len  = 0;
-static volatile uae_u32 g_uprough_watch_dirty = 1;     /* refresh snapshot on next poll */
-static uae_u8           g_uprough_watch_snap[UPROUGH_WATCH_MAX];
+/* Multi-slot since 2026-06-11 (phase 2): up to 8 simultaneous write
+ * watch ranges. The disarmed fast path is a single count load+branch;
+ * when armed, only slots with len != 0 are compared. The slot that
+ * fired lands in g_uprough_halt_detail (read via uprough_halt_detail). */
+static volatile uae_u32 g_uprough_watch_count = 0;       /* armed-slot gate */
+static volatile uae_u32 g_uprough_watch_addr[UPROUGH_WATCH_SLOTS];
+static volatile uae_u32 g_uprough_watch_len[UPROUGH_WATCH_SLOTS];
+static volatile uae_u32 g_uprough_watch_dirty[UPROUGH_WATCH_SLOTS];
+static uae_u8           g_uprough_watch_snap[UPROUGH_WATCH_SLOTS][UPROUGH_WATCH_MAX];
+
+volatile uae_u32 g_uprough_halt_detail = 0;  /* slot index / vector of the trap that fired */
+int uprough_halt_detail(void) { return (int)g_uprough_halt_detail; }
 
 int uprough_set_watch(uae_u32 addr, uae_u32 len)
 {
    if (len > UPROUGH_WATCH_MAX) len = UPROUGH_WATCH_MAX;
-   g_uprough_watch_addr  = addr;
-   g_uprough_watch_len   = len;
-   g_uprough_watch_dirty = 1;
-   return 1;
+   /* reuse a slot already watching this addr, else take a free one */
+   int slot = -1;
+   for (int i = 0; i < UPROUGH_WATCH_SLOTS; i++) {
+      if (g_uprough_watch_len[i] != 0 && g_uprough_watch_addr[i] == addr) { slot = i; break; }
+   }
+   if (slot < 0) {
+      for (int i = 0; i < UPROUGH_WATCH_SLOTS; i++) {
+         if (g_uprough_watch_len[i] == 0) { slot = i; break; }
+      }
+   }
+   if (slot < 0) return -1;
+   g_uprough_watch_addr[slot]  = addr;
+   g_uprough_watch_len[slot]   = len;
+   g_uprough_watch_dirty[slot] = 1;
+   uae_u32 n = 0;
+   for (int i = 0; i < UPROUGH_WATCH_SLOTS; i++) if (g_uprough_watch_len[i]) n++;
+   g_uprough_watch_count = n;
+   return slot;
 }
 
 void uprough_clear_watch(void)
 {
-   g_uprough_watch_addr  = 0;
-   g_uprough_watch_len   = 0;
-   g_uprough_watch_dirty = 1;
+   for (int i = 0; i < UPROUGH_WATCH_SLOTS; i++) {
+      g_uprough_watch_addr[i]  = 0;
+      g_uprough_watch_len[i]   = 0;
+      g_uprough_watch_dirty[i] = 1;
+   }
+   g_uprough_watch_count = 0;
 }
 
-/* Compare current chipmem [addr, addr+len) against the snapshot.
- * Returns 1 if any byte differs and refreshes the snapshot; 0 if
- * no change. Inlined into the poll hook so the no-watch case (len=0)
- * fast-paths to a single load + branch. */
+void uprough_clear_watch_slot(int slot)
+{
+   if (slot < 0 || slot >= UPROUGH_WATCH_SLOTS) return;
+   g_uprough_watch_len[slot]   = 0;
+   g_uprough_watch_dirty[slot] = 1;
+   uae_u32 n = 0;
+   for (int i = 0; i < UPROUGH_WATCH_SLOTS; i++) if (g_uprough_watch_len[i]) n++;
+   g_uprough_watch_count = n;
+}
+
+int uprough_watch_count(void) { return (int)g_uprough_watch_count; }
+
+/* Compare each armed slot's chipmem range against its snapshot.
+ * Returns 1 (and sets halt_detail to the slot) if any byte differs;
+ * refreshes that snapshot so the resume doesn't immediately re-halt.
+ * The no-watch case fast-paths on the count gate. */
 static inline int uprough_watch_check(void)
 {
-   uae_u32 len = g_uprough_watch_len;
-   if (len == 0) return 0;
-   uae_u32 addr = g_uprough_watch_addr;
-   if (addr >= chipmem_bank.allocated_size) return 0;
-   if (addr + len > chipmem_bank.allocated_size) len = chipmem_bank.allocated_size - addr;
-   const uae_u8 *src = chipmem_bank.baseaddr + addr;
-   if (g_uprough_watch_dirty) {
-      memcpy(g_uprough_watch_snap, src, len);
-      g_uprough_watch_dirty = 0;
-      return 0;
-   }
-   if (memcmp(g_uprough_watch_snap, src, len) != 0) {
-      memcpy(g_uprough_watch_snap, src, len);
-      return 1;
+   if (g_uprough_watch_count == 0) return 0;
+   for (int i = 0; i < UPROUGH_WATCH_SLOTS; i++) {
+      uae_u32 len = g_uprough_watch_len[i];
+      if (len == 0) continue;
+      uae_u32 addr = g_uprough_watch_addr[i];
+      if (addr >= chipmem_bank.allocated_size) continue;
+      if (addr + len > chipmem_bank.allocated_size) len = chipmem_bank.allocated_size - addr;
+      const uae_u8 *src = chipmem_bank.baseaddr + addr;
+      if (g_uprough_watch_dirty[i]) {
+         memcpy(g_uprough_watch_snap[i], src, len);
+         g_uprough_watch_dirty[i] = 0;
+         continue;
+      }
+      if (memcmp(g_uprough_watch_snap[i], src, len) != 0) {
+         memcpy(g_uprough_watch_snap[i], src, len);
+         g_uprough_halt_detail = (uae_u32)i;
+         return 1;
+      }
    }
    return 0;
 }
@@ -9768,16 +9879,17 @@ size_t uprough_audio_peek(int ch, uae_u32 *audio_state_8u32_out, uae_u8 *bytes_o
    return avail;
 }
 
-/* Read watchpoints — instrumented in memory.c's chipmem accessors.
- * Halt fires the FIRST cycle a CPU read touches [addr, addr+len).
- * Note: this only catches chipmem reads. Fast-RAM and chipset
- * register reads bypass these accessors. */
-extern void uprough_set_read_watch(uae_u32 addr, uae_u32 len);
+/* Read watchpoints — instrumented in the data-read accessors of
+ * chipmem AND every MEMORY_FUNCTIONS macro bank (slow/bogo RAM etc.,
+ * since 2026-06-11). Halt fires the FIRST cycle a CPU data read
+ * touches an armed [addr, addr+len) slot (8 slots since phase 2).
+ * Chipset register reads bypass these accessors. */
+extern int  uprough_set_read_watch(uae_u32 addr, uae_u32 len);
 extern void uprough_clear_read_watch(void);
 
-void uprough_set_read_watch_exported(uae_u32 addr, uae_u32 len)
+int uprough_set_read_watch_exported(uae_u32 addr, uae_u32 len)
 {
-   uprough_set_read_watch(addr, len);
+   return uprough_set_read_watch(addr, len);
 }
 
 void uprough_clear_read_watch_exported(void)

@@ -718,20 +718,39 @@ void REGPARAM2 chipmem_bput_limit(uaecptr addr, uae_u32 b)
 /* uprough-debug read watchpoint state — set via _uprough_set_read_watch.
  * The check itself (uprough_read_watch_check) lives in include/memory.h
  * since 2026-06-11 so the MEMORY_LGET/WGET/BGET macro banks (bogo/slow
- * RAM etc.) check it too, not just the chipmem getters below. */
-volatile uae_u32 g_uprough_read_watch_addr = 0;
-volatile uae_u32 g_uprough_read_watch_len  = 0;
+ * RAM etc.) check it too, not just the chipmem getters below.
+ * Multi-slot (8) since phase 2; count gates the disarmed fast path. */
+volatile uae_u32 g_uprough_read_watch_count = 0;
+volatile uae_u32 g_uprough_read_watch_addr[UPROUGH_READ_WATCH_SLOTS];
+volatile uae_u32 g_uprough_read_watch_len[UPROUGH_READ_WATCH_SLOTS];
 
-void uprough_set_read_watch(uae_u32 addr, uae_u32 len)
+int uprough_set_read_watch(uae_u32 addr, uae_u32 len)
 {
-   g_uprough_read_watch_addr = addr;
-   g_uprough_read_watch_len  = len;
+   int slot = -1;
+   for (int i = 0; i < UPROUGH_READ_WATCH_SLOTS; i++) {
+      if (g_uprough_read_watch_len[i] != 0 && g_uprough_read_watch_addr[i] == addr) { slot = i; break; }
+   }
+   if (slot < 0) {
+      for (int i = 0; i < UPROUGH_READ_WATCH_SLOTS; i++) {
+         if (g_uprough_read_watch_len[i] == 0) { slot = i; break; }
+      }
+   }
+   if (slot < 0) return -1;
+   g_uprough_read_watch_addr[slot] = addr;
+   g_uprough_read_watch_len[slot]  = len;
+   uae_u32 n = 0;
+   for (int i = 0; i < UPROUGH_READ_WATCH_SLOTS; i++) if (g_uprough_read_watch_len[i]) n++;
+   g_uprough_read_watch_count = n;
+   return slot;
 }
 
 void uprough_clear_read_watch(void)
 {
-   g_uprough_read_watch_addr = 0;
-   g_uprough_read_watch_len  = 0;
+   for (int i = 0; i < UPROUGH_READ_WATCH_SLOTS; i++) {
+      g_uprough_read_watch_addr[i] = 0;
+      g_uprough_read_watch_len[i]  = 0;
+   }
+   g_uprough_read_watch_count = 0;
 }
 
 static uae_u32 REGPARAM2 chipmem_lget (uaecptr addr)
