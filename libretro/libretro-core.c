@@ -8609,9 +8609,14 @@ uae_u32 uprough_capture_frame(void)  { return g_uprough_capture_frame; }
  * many frames inside one retro_run); on reaching zero the CPU halt is
  * requested (halt_cause 7 = frame_step). Non-static: custom.c
  * decrements it. Cancel with n = 0. */
+/* Seq-cst atomics for flags crossing the main-thread/worker boundary —
+ * see the visibility note at g_uprough_halt_req below. */
+#define UPROUGH_AT_STORE(var, val) __atomic_store_n(&(var), (val), __ATOMIC_SEQ_CST)
+#define UPROUGH_AT_LOAD(var)       __atomic_load_n(&(var), __ATOMIC_SEQ_CST)
+
 volatile uae_u32 g_uprough_run_frames = 0;
-void uprough_run_frames(uae_u32 n) { g_uprough_run_frames = n; }
-uae_u32 uprough_run_frames_remaining(void) { return g_uprough_run_frames; }
+void uprough_run_frames(uae_u32 n) { UPROUGH_AT_STORE(g_uprough_run_frames, n); }
+uae_u32 uprough_run_frames_remaining(void) { return UPROUGH_AT_LOAD(g_uprough_run_frames); }
 
 void retro_run(void)
 {
@@ -9351,7 +9356,17 @@ uae_u32 uprough_get_exception_catch_mask(void)      { return g_uprough_excmask; 
 #define UPROUGH_MAX_BP 64
 
 /* halt_req is referenced from memory.c (read watchpoints) and from
- * the poll hook here — must be linkable across translation units. */
+ * the poll hook here — must be linkable across translation units.
+ *
+ * CROSS-THREAD VISIBILITY (2026-06-11): flags WRITTEN from the browser
+ * main thread (the JS exports) and READ by the worker's hot loops need
+ * atomic ops — a plain volatile store from main was observed taking
+ * SECONDS to become visible to the spinning worker during catch-up
+ * bursts (cpu_set_halt ran 60+ frames late while worker-side trap
+ * halts landed instantly). UPROUGH_AT_STORE/LOAD wrap the seq-cst
+ * builtins (defined near the run_frames block above); worker-internal
+ * accesses (traps setting halt_req) stay plain — same-thread
+ * visibility is trivially fine. */
 volatile uae_u32 g_uprough_halt_req = 0;
 static volatile uae_u32 g_uprough_halted   = 0;
 /* Why the machine last halted — written together with every halt_req
@@ -9469,7 +9484,7 @@ void uprough_cpu_poll_hook(void)
       g_uprough_halt_cause = 2;  /* write watch */
    }
 
-   if (!g_uprough_halt_req) {
+   if (!UPROUGH_AT_LOAD(g_uprough_halt_req)) {
       g_uprough_halted = 0;
       return;
    }
@@ -9500,7 +9515,7 @@ void uprough_cpu_poll_hook(void)
     * produces audio on the same thread as the CPU, so halting the
     * CPU stops audio — expected behaviour for a debugger. */
    g_uprough_halted = 1;
-   while (g_uprough_halt_req && !g_uprough_step_req) {
+   while (UPROUGH_AT_LOAD(g_uprough_halt_req) && !UPROUGH_AT_LOAD(g_uprough_step_req)) {
       emscripten_sleep(1);
    }
    if (g_uprough_step_req) {
@@ -9512,7 +9527,11 @@ void uprough_cpu_poll_hook(void)
 }
 
 /* JS-facing controls. */
-void uprough_set_halt(int v)         { g_uprough_halt_req = v ? 1u : 0u; g_uprough_halt_cause = 0; }
+void uprough_set_halt(int v)
+{
+   UPROUGH_AT_STORE(g_uprough_halt_cause, 0u);
+   UPROUGH_AT_STORE(g_uprough_halt_req, v ? 1u : 0u);
+}
 int  uprough_get_halted(void)        { return (int)g_uprough_halted; }
 int  uprough_get_halt_req(void)      { return (int)g_uprough_halt_req; }
 
@@ -9541,8 +9560,8 @@ void uprough_step(int n)
     * accepted but we only execute one instruction per poll; the
     * caller should loop. */
    (void)n;
-   g_uprough_halt_req = 1;
-   g_uprough_step_req = 1;
+   UPROUGH_AT_STORE(g_uprough_halt_req, 1u);
+   UPROUGH_AT_STORE(g_uprough_step_req, 1u);
 }
 
 /* Step N instructions then re-halt. Implemented as a counter: the
@@ -9554,12 +9573,12 @@ void uprough_step_n(uae_u32 n)
 {
    if (n < 1) n = 1;
    if (n > 65535) n = 65535;
-   g_uprough_step_n_remaining = n;
-   g_uprough_halt_req = 1;
+   UPROUGH_AT_STORE(g_uprough_step_n_remaining, n);
+   UPROUGH_AT_STORE(g_uprough_halt_req, 1u);
    /* Burn one step_req so the poll hook releases this instruction
     * without re-halting; subsequent ticks check the remaining
     * counter (in the hook itself — see below). */
-   g_uprough_step_req = 1;
+   UPROUGH_AT_STORE(g_uprough_step_req, 1u);
 }
 uae_u32 uprough_step_n_remaining(void) { return g_uprough_step_n_remaining; }
 

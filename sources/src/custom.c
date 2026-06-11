@@ -13464,10 +13464,18 @@ static void hsync_handler_pre(bool onvsync)
 		 * made a per-retro_run countdown overshoot by ~100 frames. The
 		 * CPU poll hook picks up the halt within an instruction of the
 		 * vblank. */
-		if (g_uprough_run_frames) {
-			if (--g_uprough_run_frames == 0) {
-				g_uprough_halt_req = 1;
-				g_uprough_halt_cause = 7;  /* frame_step */
+		{
+			/* Seq-cst load: the arm comes from the browser MAIN thread
+			 * (step_frames / seek pre-arm) — a plain load here can miss
+			 * it for seconds (same visibility issue as cpu_set_halt). */
+			uae_u32 rf = __atomic_load_n(&g_uprough_run_frames, __ATOMIC_SEQ_CST);
+			if (rf) {
+				rf--;
+				__atomic_store_n(&g_uprough_run_frames, rf, __ATOMIC_SEQ_CST);
+				if (rf == 0) {
+					g_uprough_halt_req = 1;
+					g_uprough_halt_cause = 7;  /* frame_step */
+				}
 			}
 		}
 	}
