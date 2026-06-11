@@ -8541,6 +8541,27 @@ static bool retro_update_av_info(void)
    return true;
 }
 
+/* uprough-debug: deferred full-state restore. retro_unserialize must
+ * run on the CORE thread between frames (it re-enters m68k_go); the
+ * maker bridge lives on the browser main thread, so a direct call
+ * would race the worker. The bridge instead copies the snapshot into
+ * the wasm heap and posts a request here; the top of retro_run — the
+ * canonical between-frames point on the core thread — executes it.
+ * The bridge must UN-halt the CPU first (a halted CPU is Asyncify-
+ * suspended inside m68k_go and retro_run never returns), then poll
+ * uprough_unserialize_status() for completion. */
+static const void   *g_uprough_unser_ptr  = NULL;
+static volatile uae_u32 g_uprough_unser_size = 0;
+static volatile int  g_uprough_unser_status = 0;  /* 0 idle/ok, 1 pending, -1 failed */
+
+void uprough_request_unserialize(const void *p, uae_u32 n)
+{
+   g_uprough_unser_ptr  = p;
+   g_uprough_unser_size = n;
+   g_uprough_unser_status = 1;
+}
+int uprough_unserialize_status(void) { return g_uprough_unser_status; }
+
 void retro_run(void)
 {
    static uint8_t old_frame = 0;
@@ -8549,6 +8570,14 @@ void retro_run(void)
    bool updated = false;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
       update_variables();
+
+   /* uprough-debug: deferred full-state restore (see above). */
+   if (g_uprough_unser_status == 1) {
+      bool ok = g_uprough_unser_ptr && g_uprough_unser_size
+         ? retro_unserialize(g_uprough_unser_ptr, (size_t)g_uprough_unser_size)
+         : false;
+      g_uprough_unser_status = ok ? 0 : -1;
+   }
 
    /* Poll inputs */
    input_poll_cb();
@@ -8794,9 +8823,20 @@ bool retro_serialize(void *data_, size_t size)
    return success;
 }
 
+/* Forward decls of the uprough debugger halt flags (defined further
+ * down, near the poll hook). retro_unserialize re-enters m68k_go();
+ * if the CPU is Asyncify-suspended in the halt spin (inside m68k_go)
+ * that re-entry corrupts the unwound stack. The bridge un-halts
+ * before restoring; this guard is the safety net. */
+extern volatile uae_u32 g_uprough_halt_req;
+static volatile uae_u32 g_uprough_halted;
+
 bool retro_unserialize(const void *data_, size_t size)
 {
    bool success = false;
+
+   if (g_uprough_halted || g_uprough_halt_req)
+      return false;
 
    /* Cannot restore state while any 'savestate'
     * operation is underway
@@ -9243,6 +9283,22 @@ static volatile uae_u32 g_uprough_bp_count = 0;
 static inline int uprough_watch_check(void);   /* fwd decl, defined below */
 extern volatile uae_u32 g_uprough_step_n_remaining;  /* fwd, defined below */
 
+/* Beamtrap — vAmiga `cbreak`/`btrap` parity: halt when the beam reaches
+ * raster position (v, h). h < 0 means "anywhere on line v". Checked per
+ * CPU instruction, so vpos is exact and hpos is +-one instruction
+ * (~4-20 colour clocks) — not cycle-exact, document as such. A long
+ * instruction can in theory step past a short line remainder, so the
+ * fire condition is "at or past" with a wait-for-wrap arming state:
+ *   state 0 = off, 1 = waiting for beam to wrap above target,
+ *   2 = armed (beam is above target, fire when it reaches it). */
+extern int vpos;                /* custom.c (also extern'd below) */
+extern int current_hpos(void);
+static volatile int      g_uprough_beamtrap_v = -1;
+static volatile int      g_uprough_beamtrap_h = -1;
+static volatile uae_u32  g_uprough_beamtrap_state = 0;
+static volatile uae_u32  g_uprough_beamtrap_persist = 0;
+static volatile uae_u32  g_uprough_beamtrap_fired = 0;
+
 void uprough_cpu_poll_hook(void)
 {
    /* Common-path optimisation: PC fetched once and reused for trace +
@@ -9288,6 +9344,25 @@ void uprough_cpu_poll_hook(void)
          if (g_uprough_bp_pcs[i] == pc) {
             g_uprough_halt_req = 1;
             break;
+         }
+      }
+   }
+
+   /* Beamtrap check (skipped when disarmed — the common path). */
+   if (g_uprough_beamtrap_state) {
+      int v = vpos;
+      if (g_uprough_beamtrap_state == 1) {
+         /* waiting for the frame wrap so we don't fire on a beam
+          * already past the target */
+         if (v < g_uprough_beamtrap_v) g_uprough_beamtrap_state = 2;
+      } else {
+         if (v > g_uprough_beamtrap_v ||
+             (v == g_uprough_beamtrap_v &&
+              (g_uprough_beamtrap_h < 0 ||
+               current_hpos() >= g_uprough_beamtrap_h))) {
+            g_uprough_halt_req = 1;
+            g_uprough_beamtrap_fired = 1;
+            g_uprough_beamtrap_state = g_uprough_beamtrap_persist ? 1 : 0;
          }
       }
    }
@@ -9345,6 +9420,25 @@ void uprough_cpu_poll_hook(void)
 void uprough_set_halt(int v)         { g_uprough_halt_req = v ? 1u : 0u; }
 int  uprough_get_halted(void)        { return (int)g_uprough_halted; }
 int  uprough_get_halt_req(void)      { return (int)g_uprough_halt_req; }
+
+/* Beamtrap controls. persist != 0 re-arms after each fire (halts once
+ * per frame at the target position). Arming picks the initial state
+ * from the current beam position: above the target -> armed now,
+ * at/past it -> wait for the frame wrap first. */
+void uprough_set_beamtrap(int v, int h, int persist)
+{
+   g_uprough_beamtrap_v = v;
+   g_uprough_beamtrap_h = h;
+   g_uprough_beamtrap_persist = persist ? 1u : 0u;
+   g_uprough_beamtrap_fired = 0;
+   g_uprough_beamtrap_state = (vpos < v) ? 2u : 1u;
+}
+void uprough_clear_beamtrap(void)
+{
+   g_uprough_beamtrap_state = 0;
+   g_uprough_beamtrap_fired = 0;
+}
+int uprough_beamtrap_hit(void) { return (int)g_uprough_beamtrap_fired; }
 
 void uprough_step(int n)
 {
@@ -9547,6 +9641,7 @@ extern uae_u16 adkcon;
  * assign below. */
 extern uae_u32 uprough_chip_get_cop1lc(void);
 extern uae_u32 uprough_chip_get_cop2lc(void);
+extern uae_u32 uprough_chip_get_copper_ip(void);  /* also declared below for the copper tool */
 extern uae_u16 uprough_chip_get_bplcon1(void);
 extern uae_u16 uprough_chip_get_bplcon2(void);
 extern uae_u16 uprough_chip_get_bplcon3(void);
@@ -9565,7 +9660,7 @@ void *uprough_get_chipset_regs(void)
    g_uprough_chipset_snapshot.hpos      = (uae_u32)current_hpos();
    g_uprough_chipset_snapshot.cop1lc    = uprough_chip_get_cop1lc();
    g_uprough_chipset_snapshot.cop2lc    = uprough_chip_get_cop2lc();
-   g_uprough_chipset_snapshot.copper_pc = 0;
+   g_uprough_chipset_snapshot.copper_pc = uprough_chip_get_copper_ip();
    g_uprough_chipset_snapshot.intena    = intena;
    g_uprough_chipset_snapshot.intreq    = intreq;
    g_uprough_chipset_snapshot.dmacon    = dmacon;

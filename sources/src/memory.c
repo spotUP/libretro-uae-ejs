@@ -716,22 +716,11 @@ void REGPARAM2 chipmem_bput_limit(uaecptr addr, uae_u32 b)
 
 
 /* uprough-debug read watchpoint state — set via _uprough_set_read_watch.
- * Checked in the chipmem read accessors below. Fast-path: one volatile
- * load + branch when len==0 (common case). */
+ * The check itself (uprough_read_watch_check) lives in include/memory.h
+ * since 2026-06-11 so the MEMORY_LGET/WGET/BGET macro banks (bogo/slow
+ * RAM etc.) check it too, not just the chipmem getters below. */
 volatile uae_u32 g_uprough_read_watch_addr = 0;
 volatile uae_u32 g_uprough_read_watch_len  = 0;
-extern volatile uae_u32 g_uprough_halt_req;
-
-static inline void uprough_read_watch_check(uaecptr addr)
-{
-   uae_u32 len = g_uprough_read_watch_len;
-   if (len == 0) return;
-   uae_u32 base = g_uprough_read_watch_addr;
-   uae_u32 a = (uae_u32)addr;
-   if (a >= base && a < base + len) {
-      g_uprough_halt_req = 1;
-   }
-}
 
 void uprough_set_read_watch(uae_u32 addr, uae_u32 len)
 {

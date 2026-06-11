@@ -207,6 +207,27 @@ struct autoconfig_info
 #define CE_MEMBANK_FAST16 4
 //#define CE_MEMBANK_FAST16_EXTRA_ACCURACY 5
 
+/* uprough-debug read watchpoint (state + setters live in memory.c).
+ * Checked in the DATA-get accessors of every MEMORY_FUNCTIONS bank
+ * (bogo/slow RAM at $C00000 etc.) and chipmem — NOT in the lgeti/wgeti
+ * instruction fetches, which would be pure noise. The check runs
+ * BEFORE `addr -= startaccessmask` so the full 68k address is
+ * compared (same convention as the chipmem getters). Cost when
+ * disarmed: one volatile load + branch. */
+extern volatile uae_u32 g_uprough_read_watch_addr;
+extern volatile uae_u32 g_uprough_read_watch_len;
+extern volatile uae_u32 g_uprough_halt_req;
+STATIC_INLINE void uprough_read_watch_check(uaecptr addr)
+{
+	uae_u32 len = g_uprough_read_watch_len;
+	if (len != 0) {
+		uae_u32 a = (uae_u32)addr;
+		uae_u32 base = g_uprough_read_watch_addr;
+		if (a >= base && a < base + len)
+			g_uprough_halt_req = 1;
+	}
+}
+
 #define MEMORY_LGETI(name) \
 static uae_u32 REGPARAM3 name ## _lgeti (uaecptr) REGPARAM; \
 static uae_u32 REGPARAM2 name ## _lgeti (uaecptr addr) \
@@ -232,6 +253,7 @@ static uae_u32 REGPARAM3 name ## _lget (uaecptr) REGPARAM; \
 static uae_u32 REGPARAM2 name ## _lget (uaecptr addr) \
 { \
 	uae_u8 *m; \
+	uprough_read_watch_check(addr); \
 	addr -= name ## _bank.startaccessmask; \
 	addr &= name ## _bank.mask; \
 	m = name ## _bank.baseaddr + addr; \
@@ -242,6 +264,7 @@ static uae_u32 REGPARAM3 name ## _wget (uaecptr) REGPARAM; \
 static uae_u32 REGPARAM2 name ## _wget (uaecptr addr) \
 { \
 	uae_u8 *m; \
+	uprough_read_watch_check(addr); \
 	addr -= name ## _bank.startaccessmask; \
 	addr &= name ## _bank.mask; \
 	m = name ## _bank.baseaddr + addr; \
@@ -251,6 +274,7 @@ static uae_u32 REGPARAM2 name ## _wget (uaecptr addr) \
 static uae_u32 REGPARAM3 name ## _bget (uaecptr) REGPARAM; \
 static uae_u32 REGPARAM2 name ## _bget (uaecptr addr) \
 { \
+	uprough_read_watch_check(addr); \
 	addr -= name ## _bank.startaccessmask; \
 	addr &= name ## _bank.mask; \
 	return name ## _bank.baseaddr[addr]; \
