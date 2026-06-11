@@ -9333,7 +9333,7 @@ uae_u32 uprough_trace_get_capacity(void)  { return UPROUGH_TRACE_LEN; }
  *  10 = Line A emulator (often hit on bad opcode)
  *  11 = Line F emulator (FPU not present)
  * ------------------------------------------------------------------ */
-static volatile uae_u32 g_uprough_excmask = 0;
+volatile uae_u32 g_uprough_excmask = 0;  /* non-static: ExceptionX (newcpu.c) checks it */
 
 void uprough_set_exception_catch_mask(uae_u32 mask) { g_uprough_excmask = mask; }
 uae_u32 uprough_get_exception_catch_mask(void)      { return g_uprough_excmask; }
@@ -9434,16 +9434,9 @@ void uprough_cpu_poll_hook(void)
       g_uprough_regs_ring_head = (g_uprough_regs_ring_head + 1) & 0xffffffff;
    }
 
-   /* Exception catchpoint: regs.exception is non-zero during the
-    * cycle the CPU is taking an exception. The 68k vector number is
-    * encoded as exception index; we use it as a bit in the mask
-    * (bit N = vector N). Mask = 0 means no catchpoints, common path. */
-   if (g_uprough_excmask != 0 && regs.exception != 0) {
-      if (regs.exception < 32 && (g_uprough_excmask & (1u << regs.exception))) {
-         g_uprough_halt_req = 1;
-         g_uprough_halt_cause = 6;  /* exception catchpoint */
-      }
-   }
+   /* Exception catchpoints moved INTO ExceptionX (newcpu.c): this
+    * function clears regs.exception before any poll hook runs, so a
+    * check here never fired. See the 2026-06-11 note in newcpu.c. */
 
    /* Breakpoint check (skipped when list is empty — the common path). */
    if (g_uprough_bp_count != 0) {

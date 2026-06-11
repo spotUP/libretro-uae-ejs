@@ -3501,6 +3501,26 @@ static void ExceptionX (int nr, uaecptr address, uaecptr oldpc)
 		g_uprough_irqlog_head = g_uprough_irqlog_head + 1;
 	}
 
+	/* uprough-debug exception catchpoint — checked HERE, not in the CPU
+	 * poll hook: this function clears regs.exception at its own end
+	 * (below), synchronously, so a poll-hook test of regs.exception can
+	 * NEVER observe it (the catchpoints silently never fired on this
+	 * path — found 2026-06-11 hunting an illegal-instruction guru). The
+	 * halt request lands via the poll hook at the guest vector handler's
+	 * first instruction. */
+	{
+		extern volatile uae_u32 g_uprough_excmask;
+		extern volatile uae_u32 g_uprough_halt_req;
+		extern volatile uae_u32 g_uprough_halt_cause;
+		extern volatile uae_u32 g_uprough_halt_detail;
+		if (g_uprough_excmask != 0 && nr > 0 && nr < 32 &&
+		    (g_uprough_excmask & (1u << nr))) {
+			g_uprough_halt_detail = (uae_u32)nr;
+			g_uprough_halt_cause = 6;  /* exception catchpoint */
+			g_uprough_halt_req = 1;
+		}
+	}
+
 #ifdef DEBUGGER
 	if (debug_dma) {
 		record_dma_event_data(DMA_EVENT_CPUINS, current_hpos(), vpos, 0x20000);
