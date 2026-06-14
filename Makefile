@@ -220,6 +220,12 @@ else ifeq ($(platform), emscripten)
    STATIC_LINKING=1
    STATIC_LINKING_LINK=1
    NO_LIBRETRO_VFS=1
+   # WASM SIMD: -msimd128 lets -O3 auto-vectorize the hot core loops (blitter,
+   # chunky->planar, audio mix). Independent of threading; universal browser
+   # support since 2021. Modest gain on the (branchy) m68k interpreter itself.
+   PLATFLAGS += -msimd128
+   CFLAGS += -msimd128
+   CXXFLAGS += -msimd128
    ifeq ($(EMULATORJS_THREADS), 1)
       # -pthread alone in emscripten 4.0.16 enables atomics but not always
       # bulk-memory; wasm-ld then rejects --shared-memory. Add the LLVM
