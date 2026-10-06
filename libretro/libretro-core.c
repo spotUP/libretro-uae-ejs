@@ -5078,6 +5078,8 @@ static struct retro_disk_control_ext_callback disk_interface_ext = {
 static void fallback_log(enum retro_log_level level, const char *fmt, ...)
 {
    (void)level;
+   if (!fmt || !stderr)
+      return;
    va_list va;
    va_start(va, fmt);
    vfprintf(stderr, fmt, va);
@@ -9026,7 +9028,13 @@ size_t retro_get_memory_size(unsigned id)
  * ------------------------------------------------------------------ */
 
 #include "newcpu.h"
+#ifdef __EMSCRIPTEN__
 #include <emscripten.h>   /* emscripten_sleep — needed by halt spin */
+#define UPROUGH_DEBUG_SLEEP_MS(ms) emscripten_sleep(ms)
+#else
+#include <unistd.h>
+#define UPROUGH_DEBUG_SLEEP_MS(ms) usleep((ms) * 1000)
+#endif
 
 /* Layout matches the JS-side decoder in debugBridge.ts. Keep these
  * in sync. uae_u32 fields are written via direct struct copy; the
@@ -9509,7 +9517,7 @@ void uprough_cpu_poll_hook(void)
     * CPU stops audio — expected behaviour for a debugger. */
    g_uprough_halted = 1;
    while (UPROUGH_AT_LOAD(g_uprough_halt_req) && !UPROUGH_AT_LOAD(g_uprough_step_req)) {
-      emscripten_sleep(1);
+      UPROUGH_DEBUG_SLEEP_MS(1);
    }
    if (g_uprough_step_req) {
       g_uprough_step_req = 0;

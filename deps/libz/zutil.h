@@ -128,7 +128,7 @@ extern char z_errmsg[10][21]; /* indexed by 2-zlib_error */
 #    if defined(__MWERKS__) && __dest_os != __be_os && __dest_os != __win32_os
 #      include <unix.h> /* for fdopen */
 #    else
-#      ifndef fdopen
+#      if !defined(__APPLE__) && !defined(fdopen)
 #        define fdopen(fd,mode) NULL /* No fdopen() */
 #      endif
 #    endif
